@@ -69,10 +69,10 @@ def check_pair(yf_symbol, mt5_symbol):
     # --- A. Fetch Live Price from fxapis ---
     live_price = None
     try:
-        quote = client.quotes.get(account_id=ACCOUNT_ID, symbols=mt5_symbol)
-        # Use the 'bid' price for selling, 'ask' for buying. We'll use 'ask' as a general reference.
-        live_price = float(quote['ask']) 
-        print(f"📡 Live broker price for {mt5_symbol}: {live_price:.5f}")
+        quotes = client.quotes.get(account_id=ACCOUNT_ID, symbols=mt5_symbol)
+        if quotes and len(quotes) > 0:
+            live_price = float(quotes[0]['ask']) 
+            print(f"📡 Live broker price for {mt5_symbol}: {live_price:.5f}")
     except Exception as e:
         print(f"⚠️ Could not fetch live price ({e}). Falling back to Yahoo Finance.")
 
