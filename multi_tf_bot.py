@@ -3,11 +3,16 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from fxapis import Fxapis
+import forexfactory
+from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
 ACCOUNT_ID = "34f8d1d0-6efc-40b6-8ee0-dc420a61197d" 
 LOT_SIZE = "0.01"
 RR_RATIO = 3.0
+
+# --- PROP FIRM RULES ---
+DAILY_LOSS_LIMIT_PERCENT = 0.04 # Stop trading if down 4% in a day
 
 PAIRS = [
     ("EURUSD=X", "EURUSD"),
@@ -18,9 +23,49 @@ PAIRS = [
 ]
 
 client = Fxapis()
-print("Starting Advanced SMC Bot...")
+print("Starting Advanced SMC Bot (with News & Prop Firm Filters)...")
 
-# --- 1. MANAGE OPEN TRADES (Dynamic 1:1 Breakeven) ---
+# --- 1. NEWS FILTER ---
+def is_news_time():
+    try:
+        # Get high impact news for the next 30 minutes
+        now = datetime.utcnow()
+        df = forexfactory.read(currencies=["USD", "EUR", "GBP", "JPY"], impacts=["high"])
+        
+        # Ensure 'datetime_utc' is a proper datetime object
+        df['datetime_utc'] = pd.to_datetime(df['datetime_utc'])
+        upcoming = df[(df['datetime_utc'] >= now) & (df['datetime_utc'] <= now + timedelta(minutes=30))]
+        
+        if not upcoming.empty:
+            print(f"🚨 NEWS ALERT: High impact event at {upcoming['datetime_utc'].iloc[0]}. Pausing new trades.")
+            return True
+    except Exception as e:
+        print(f"News check error (ignoring and proceeding): {e}")
+    return False
+
+# --- 2. PROP FIRM RULE CHECKER ---
+def check_prop_firm_rules():
+    try:
+        # Get live account figures from fxapis
+        figures = client.accounts.figures(account_id=ACCOUNT_ID, fresh=True)
+        balance = float(figures['balance'])
+        equity = float(figures['equity'])
+        
+        # Calculate daily loss based on equity drop from balance
+        # (A more robust method would track start-of-day balance, but this is a good safeguard)
+        current_loss_percent = ((balance - equity) / balance) * 100 if balance > 0 else 0
+        
+        print(f"📊 Account Check: Balance={balance:.2f}, Equity={equity:.2f}, Daily Loss={current_loss_percent:.2f}%")
+        
+        if current_loss_percent >= (DAILY_LOSS_LIMIT_PERCENT * 100):
+            print(f"🛑 PROP FIRM RULE BREACH: Daily loss of {current_loss_percent:.2f}% exceeds limit of {DAILY_LOSS_LIMIT_PERCENT*100}%. Stopping all new trades.")
+            return False # Signal to stop trading
+        return True # Signal to continue trading
+    except Exception as e:
+        print(f"⚠️ Could not check prop firm rules: {e}. Proceeding with caution.")
+        return True # If we can't check, we proceed, but log the error.
+
+# --- 3. TRADE MANAGEMENT (Dynamic 1:1 Breakeven) ---
 def manage_open_trades():
     try:
         positions = client.positions.list(account_id=ACCOUNT_ID)
@@ -34,7 +79,6 @@ def manage_open_trades():
                 
             initial_risk = abs(entry - current_sl)
             
-            # Spread buffer for safe breakeven
             if "JPY" in pos['symbol']:
                 buffer = 0.015
             elif pos['symbol'] == "XAUUSD":
@@ -62,21 +106,19 @@ def manage_open_trades():
     except Exception as e:
         print("Trade management error:", e)
 
-# --- 2. SMC STRATEGY & EXECUTION ---
+# --- 4. SMC STRATEGY & EXECUTION ---
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ---")
     
-    # --- A. Fetch Live Price from fxapis safely ---
+    # --- A. Fetch Live Price from fxapis ---
     live_price = None
     try:
         quotes = client.quotes.get(account_id=ACCOUNT_ID, symbols=mt5_symbol)
         if quotes and len(quotes) > 0:
             quote = quotes[0]
-            # Safely extract ask or bid
             ask = quote.get('ask') if isinstance(quote, dict) else getattr(quote, 'ask', None)
             bid = quote.get('bid') if isinstance(quote, dict) else getattr(quote, 'bid', None)
             
-            # Check if the data is not None or a string "None"
             if ask is not None and str(ask).lower() != 'none':
                 live_price = float(ask)
             elif bid is not None and str(bid).lower() != 'none':
@@ -174,12 +216,22 @@ def check_pair(yf_symbol, mt5_symbol):
         print("No clear setup right now.")
 
 # --- MAIN RUN ---
-print("1. Managing open trades (Moving SL to Risk-Free if 1:1 hit)...")
+print("1. Managing open trades...")
 manage_open_trades()
 
-print("\n2. Scanning pairs for new SMC FVG setups...")
-for yf_sym, mt5_sym in PAIRS:
-    check_pair(yf_sym, mt5_sym)
-    time.sleep(5) 
+print("\n2. Checking Prop Firm Rules...")
+if not check_prop_firm_rules():
+    print("🛑 Stopping all trading for this cycle due to prop firm rule limit.")
+else:
+    print("✅ Prop firm rules OK. Proceeding...")
+    
+    print("\n3. Checking Economic Calendar...")
+    if is_news_time():
+        print("📰 Skipping new entries due to high-impact news.")
+    else:
+        print("✅ No high-impact news. Scanning pairs...")
+        for yf_sym, mt5_sym in PAIRS:
+            check_pair(yf_sym, mt5_sym)
+            time.sleep(5) 
 
-print("\nFinished checking all pairs. Going back to sleep.")
+print("\nFinished. Going back to sleep.")
