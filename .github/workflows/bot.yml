@@ -1,9 +1,9 @@
 name: Run MT5 Bot
 
 on:
-  push:
-  schedule:
-    - cron: "*/15 * * * *"
+  # push:
+  # schedule:
+  #   - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install fxapis yfinance pandas numpy requests
+        pip install fxapis yfinance pandas numpy forexfactory
 
     - name: Run the bot
       env:
