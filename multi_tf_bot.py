@@ -19,7 +19,7 @@ PAIRS = [
 ]
 
 client = Fxapis()
-print("Starting Advanced SMC Bot...")
+print("Starting Advanced SMC Bot (with Live Price Feed)...")
 
 # --- 1. MANAGE OPEN TRADES (Dynamic 1:1 Breakeven) ---
 def manage_open_trades():
@@ -35,7 +35,6 @@ def manage_open_trades():
                 
             initial_risk = abs(entry - current_sl)
             
-            # Spread buffer for safe breakeven
             if "JPY" in pos['symbol']:
                 buffer = 0.015
             elif pos['symbol'] == "XAUUSD":
@@ -67,6 +66,17 @@ def manage_open_trades():
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ---")
     
+    # --- A. Fetch Live Price from fxapis ---
+    live_price = None
+    try:
+        quote = client.quotes.get(account_id=ACCOUNT_ID, symbols=mt5_symbol)
+        # Use the 'bid' price for selling, 'ask' for buying. We'll use 'ask' as a general reference.
+        live_price = float(quote['ask']) 
+        print(f"📡 Live broker price for {mt5_symbol}: {live_price:.5f}")
+    except Exception as e:
+        print(f"⚠️ Could not fetch live price ({e}). Falling back to Yahoo Finance.")
+
+    # --- B. Account & Data Checks ---
     try:
         positions = client.positions.list(account_id=ACCOUNT_ID)
         orders = client.orders.list(account_id=ACCOUNT_ID)
@@ -92,13 +102,13 @@ def check_pair(yf_symbol, mt5_symbol):
     if len(df) < 50:
         return
 
-    current_price = df['Close'].iloc[-1]
+    # Use live price if we got it, otherwise fallback to Yahoo Finance
+    current_price = live_price if live_price is not None else df['Close'].iloc[-1]
     
     # Dynamic buffer
     sl_buffer = 0.020 if "JPY" in mt5_symbol else (0.20 if mt5_symbol == "XAUUSD" else 0.00020)
 
-    # --- MANUAL SMC LOGIC ---
-    # 1. Detect Fair Value Gap (FVG) in the last 3 candles
+    # --- C. Manual SMC Logic (Uses completed candles for FVG detection) ---
     c1_high = df['High'].iloc[-3]
     c1_low = df['Low'].iloc[-3]
     c3_high = df['High'].iloc[-1]
@@ -107,16 +117,14 @@ def check_pair(yf_symbol, mt5_symbol):
     bullish_fvg = c3_low > c1_high
     bearish_fvg = c3_high < c1_low
 
-    # 2. Check H1 Trend (Simple check: is current price above 50 EMA on H1?)
     df_h1 = ticker.history(period="2d", interval="1h")
     df_h1['EMA_50'] = df_h1['Close'].ewm(span=50, adjust=False).mean()
     h1_bullish = df_h1['Close'].iloc[-1] > df_h1['EMA_50'].iloc[-1]
 
-    # --- EXECUTION ---
+    # --- D. Execution ---
     if bullish_fvg and h1_bullish:
         print("🟢 Setup Found: BULLISH FVG + H1 Trend")
         
-        # Entry at the top of the FVG
         poi_price = c1_high 
         sl = df['Low'].iloc[-3:].min() - sl_buffer
         risk = poi_price - sl
@@ -135,7 +143,6 @@ def check_pair(yf_symbol, mt5_symbol):
     elif bearish_fvg and not h1_bullish:
         print("🔴 Setup Found: BEARISH FVG + H1 Trend")
         
-        # Entry at the bottom of the FVG
         poi_price = c1_low
         sl = df['High'].iloc[-3:].max() + sl_buffer
         risk = sl - poi_price
