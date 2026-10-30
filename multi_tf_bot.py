@@ -3,7 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from fxapis import Fxapis
-from datetime import datetime
 
 # --- CONFIGURATION ---
 ACCOUNT_ID = "34f8d1d0-6efc-40b6-8ee0-dc420a61197d" 
@@ -19,7 +18,7 @@ PAIRS = [
 ]
 
 client = Fxapis()
-print("Starting Advanced SMC Bot (with Live Price Feed)...")
+print("Starting Advanced SMC Bot...")
 
 # --- 1. MANAGE OPEN TRADES (Dynamic 1:1 Breakeven) ---
 def manage_open_trades():
@@ -35,6 +34,7 @@ def manage_open_trades():
                 
             initial_risk = abs(entry - current_sl)
             
+            # Spread buffer for safe breakeven
             if "JPY" in pos['symbol']:
                 buffer = 0.015
             elif pos['symbol'] == "XAUUSD":
@@ -66,15 +66,28 @@ def manage_open_trades():
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ---")
     
-    # --- A. Fetch Live Price from fxapis ---
+    # --- A. Fetch Live Price from fxapis safely ---
     live_price = None
     try:
         quotes = client.quotes.get(account_id=ACCOUNT_ID, symbols=mt5_symbol)
         if quotes and len(quotes) > 0:
-            live_price = float(quotes[0]['ask']) 
-            print(f"📡 Live broker price for {mt5_symbol}: {live_price:.5f}")
+            quote = quotes[0]
+            # Safely extract ask or bid
+            ask = quote.get('ask') if isinstance(quote, dict) else getattr(quote, 'ask', None)
+            bid = quote.get('bid') if isinstance(quote, dict) else getattr(quote, 'bid', None)
+            
+            # Check if the data is not None or a string "None"
+            if ask is not None and str(ask).lower() != 'none':
+                live_price = float(ask)
+            elif bid is not None and str(bid).lower() != 'none':
+                live_price = float(bid)
+                
+            if live_price is not None:
+                print(f"📡 Live broker price for {mt5_symbol}: {live_price:.5f}")
+            else:
+                print(f"⚠️ Broker returned empty price for {mt5_symbol}. Using Yahoo.")
     except Exception as e:
-        print(f"⚠️ Could not fetch live price ({e}). Falling back to Yahoo Finance.")
+        print(f"⚠️ Could not fetch live price ({e}). Using Yahoo.")
 
     # --- B. Account & Data Checks ---
     try:
@@ -108,7 +121,7 @@ def check_pair(yf_symbol, mt5_symbol):
     # Dynamic buffer
     sl_buffer = 0.020 if "JPY" in mt5_symbol else (0.20 if mt5_symbol == "XAUUSD" else 0.00020)
 
-    # --- C. Manual SMC Logic (Uses completed candles for FVG detection) ---
+    # --- C. Manual SMC Logic (FVG Detection) ---
     c1_high = df['High'].iloc[-3]
     c1_low = df['Low'].iloc[-3]
     c3_high = df['High'].iloc[-1]
