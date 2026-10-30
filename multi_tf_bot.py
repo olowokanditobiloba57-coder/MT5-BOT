@@ -3,9 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from fxapis import Fxapis
-import forexfactory
-from datetime import datetime, timedelta
-import pyvsmc as smc
+from datetime import datetime
 
 # --- CONFIGURATION ---
 ACCOUNT_ID = "34f8d1d0-6efc-40b6-8ee0-dc420a61197d" 
@@ -23,20 +21,7 @@ PAIRS = [
 client = Fxapis()
 print("Starting Advanced SMC Bot...")
 
-# --- 1. NEWS FILTER ---
-def is_high_impact_news():
-    try:
-        now = datetime.utcnow()
-        df = forexfactory.read(currencies=["USD", "EUR", "GBP", "JPY"], impacts=["high"])
-        upcoming = df[(df['datetime_utc'] >= now) & (df['datetime_utc'] <= now + timedelta(minutes=30))]
-        if not upcoming.empty:
-            print(f"🚨 NEWS ALERT: High impact event at {upcoming['datetime_utc'].iloc[0]}. Pausing trades.")
-            return True
-    except Exception as e:
-        print("News check error (ignoring and proceeding):", e)
-    return False
-
-# --- 2. MANAGE OPEN TRADES (Dynamic 1:1 Breakeven + Spread Buffer) ---
+# --- 1. MANAGE OPEN TRADES (Dynamic 1:1 Breakeven) ---
 def manage_open_trades():
     try:
         positions = client.positions.list(account_id=ACCOUNT_ID)
@@ -48,10 +33,9 @@ def manage_open_trades():
             if current_sl == 0.0:
                 continue
                 
-            # Calculate the exact risk distance based on the actual trade
             initial_risk = abs(entry - current_sl)
             
-            # Dynamic spread buffer to ensure true risk-free breakeven
+            # Spread buffer for safe breakeven
             if "JPY" in pos['symbol']:
                 buffer = 0.015
             elif pos['symbol'] == "XAUUSD":
@@ -60,48 +44,42 @@ def manage_open_trades():
                 buffer = 0.00015
                 
             if pos['side'] == 'buy':
-                price_distance = current_price - entry
-                
-                # If profit reaches 1:1 risk, move SL to entry + buffer
-                if price_distance >= initial_risk and current_sl < entry:
+                if (current_price - entry) >= initial_risk and current_sl < entry:
                     new_sl = entry + buffer
-                    print(f"🛡️ 1:1 Profit hit! Moving SL to Risk-Free Breakeven for {pos['symbol']}")
+                    print(f"🛡️ 1:1 Profit hit! Moving SL to Risk-Free for {pos['symbol']}")
                     try:
                         client.positions.modify(account_id=ACCOUNT_ID, position_id=pos['id'], stop_loss=f"{new_sl:.5f}")
                     except Exception as e:
-                        print("Failed to modify SL:", e)
+                        print("Modify Error:", e)
                         
             elif pos['side'] == 'sell':
-                price_distance = entry - current_price
-                
-                if price_distance >= initial_risk and (current_sl > entry or current_sl == 0):
+                if (entry - current_price) >= initial_risk and (current_sl > entry or current_sl == 0):
                     new_sl = entry - buffer
-                    print(f"🛡️ 1:1 Profit hit! Moving SL to Risk-Free Breakeven for {pos['symbol']}")
+                    print(f"🛡️ 1:1 Profit hit! Moving SL to Risk-Free for {pos['symbol']}")
                     try:
                         client.positions.modify(account_id=ACCOUNT_ID, position_id=pos['id'], stop_loss=f"{new_sl:.5f}")
                     except Exception as e:
-                        print("Failed to modify SL:", e)
+                        print("Modify Error:", e)
     except Exception as e:
         print("Trade management error:", e)
 
-# --- 3. SMC STRATEGY & EXECUTION ---
+# --- 2. SMC STRATEGY & EXECUTION ---
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ---")
     
     try:
         positions = client.positions.list(account_id=ACCOUNT_ID)
         orders = client.orders.list(account_id=ACCOUNT_ID)
-        
         for pos in positions:
             if pos['symbol'] == mt5_symbol:
-                print(f"Already in a trade for {mt5_symbol}. Skipping.")
+                print(f"Already in a trade. Skipping.")
                 return
         for order in orders:
             if order['symbol'] == mt5_symbol and order.get('state') == 'placed':
-                print(f"Pending order exists for {mt5_symbol}. Skipping.")
+                print(f"Pending order exists. Skipping.")
                 return
     except Exception as e:
-        print("Error checking account:", e)
+        print("Account check error:", e)
         return
 
     try:
@@ -114,36 +92,37 @@ def check_pair(yf_symbol, mt5_symbol):
     if len(df) < 50:
         return
 
-    # Prepare arrays for pyvsmc
-    high = np.array(df['High'], dtype=float)
-    low = np.array(df['Low'], dtype=float)
-    close = np.array(df['Close'], dtype=float)
-    open_ = np.array(df['Open'], dtype=float)
-    current_price = close[-1]
-
-    # Detect SMC concepts
-    try:
-        structure = smc.detect_structure(high, low, close, window_size=2, break_mode="close")
-        fvgs = smc.detect_fvg(high, low, close=close)
-        obs = smc.detect_order_blocks(open_, high, low, close, lookback=5, zone_mode="body")
-    except Exception as e:
-        print("SMC calculation error:", e)
-        return
-
-    # Dynamic buffer for initial Stop Loss
+    current_price = df['Close'].iloc[-1]
+    
+    # Dynamic buffer
     sl_buffer = 0.020 if "JPY" in mt5_symbol else (0.20 if mt5_symbol == "XAUUSD" else 0.00020)
 
-    # --- BULLISH SETUP (BUY) ---
-    if structure.trend == "bullish" and len(fvgs.bullish) > 0 and len(obs.bullish_ob) > 0:
-        print("Setup Found: BULLISH FVG + Order Block")
+    # --- MANUAL SMC LOGIC ---
+    # 1. Detect Fair Value Gap (FVG) in the last 3 candles
+    c1_high = df['High'].iloc[-3]
+    c1_low = df['Low'].iloc[-3]
+    c3_high = df['High'].iloc[-1]
+    c3_low = df['Low'].iloc[-1]
+    
+    bullish_fvg = c3_low > c1_high
+    bearish_fvg = c3_high < c1_low
+
+    # 2. Check H1 Trend (Simple check: is current price above 50 EMA on H1?)
+    df_h1 = ticker.history(period="2d", interval="1h")
+    df_h1['EMA_50'] = df_h1['Close'].ewm(span=50, adjust=False).mean()
+    h1_bullish = df_h1['Close'].iloc[-1] > df_h1['EMA_50'].iloc[-1]
+
+    # --- EXECUTION ---
+    if bullish_fvg and h1_bullish:
+        print("🟢 Setup Found: BULLISH FVG + H1 Trend")
         
-        # Entry near the top of the most recent FVG
-        poi_price = fvgs.top[-1] if hasattr(fvgs, 'top') else current_price
-        sl = low[-5:].min() - sl_buffer
+        # Entry at the top of the FVG
+        poi_price = c1_high 
+        sl = df['Low'].iloc[-3:].min() - sl_buffer
         risk = poi_price - sl
         tp = poi_price + (risk * RR_RATIO)
         
-        print(f"BUY LIMIT {mt5_symbol} at {poi_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f}")
+        print(f"🎯 BUY LIMIT {mt5_symbol} at {poi_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f}")
         try:
             client.orders.limit(
                 account_id=ACCOUNT_ID, symbol=mt5_symbol, side="buy", volume=LOT_SIZE,
@@ -153,16 +132,16 @@ def check_pair(yf_symbol, mt5_symbol):
         except Exception as e:
             print("Trade Error:", e)
 
-    # --- BEARISH SETUP (SELL) ---
-    elif structure.trend == "bearish" and len(fvgs.bearish) > 0 and len(obs.bearish_ob) > 0:
-        print("Setup Found: BEARISH FVG + Order Block")
+    elif bearish_fvg and not h1_bullish:
+        print("🔴 Setup Found: BEARISH FVG + H1 Trend")
         
-        poi_price = fvgs.bottom[-1] if hasattr(fvgs, 'bottom') else current_price
-        sl = high[-5:].max() + sl_buffer
+        # Entry at the bottom of the FVG
+        poi_price = c1_low
+        sl = df['High'].iloc[-3:].max() + sl_buffer
         risk = sl - poi_price
         tp = poi_price - (risk * RR_RATIO)
         
-        print(f"SELL LIMIT {mt5_symbol} at {poi_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f}")
+        print(f"🎯 SELL LIMIT {mt5_symbol} at {poi_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f}")
         try:
             client.orders.limit(
                 account_id=ACCOUNT_ID, symbol=mt5_symbol, side="sell", volume=LOT_SIZE,
@@ -175,16 +154,12 @@ def check_pair(yf_symbol, mt5_symbol):
         print("No clear setup right now.")
 
 # --- MAIN RUN ---
-print("1. Managing open trades (Trailing to Breakeven)...")
+print("1. Managing open trades (Moving SL to Risk-Free if 1:1 hit)...")
 manage_open_trades()
 
-print("2. Checking Economic Calendar...")
-if is_high_impact_news():
-    print("Skipping new entries due to high-impact news.")
-else:
-    print("3. Scanning pairs for new SMC setups...")
-    for yf_sym, mt5_sym in PAIRS:
-        check_pair(yf_sym, mt5_sym)
-        time.sleep(5) 
+print("\n2. Scanning pairs for new SMC FVG setups...")
+for yf_sym, mt5_sym in PAIRS:
+    check_pair(yf_sym, mt5_sym)
+    time.sleep(5) 
 
 print("\nFinished checking all pairs. Going back to sleep.")
