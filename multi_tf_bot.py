@@ -62,7 +62,7 @@ PAIRS = [
     ("GC=F", "XAUUSDm")     
 ]
 
-print("Starting Advanced SMC Bot (Auto-Connect Engine)...")
+print("Starting Advanced SMC Bot (Smart Execution Engine)...")
 
 # --- HELPER FUNCTION: IS THE TRADE RISK-FREE? ---
 def is_position_risk_free(pos):
@@ -129,6 +129,7 @@ def manage_open_trades():
             
             if current_sl == 0.0 or tp == 0.0: continue
                 
+            # Estimate original risk based on the TP distance and minimum RR
             original_risk = abs(tp - entry) / MIN_RR_RATIO
             
             if "JPY" in pos.symbol: buffer = 0.015
@@ -179,12 +180,9 @@ def check_pair(yf_symbol, mt5_symbol):
     except Exception:
         pass
 
-    # CHECK ACCOUNT & ORDERS
     try:
         acc_detail = client.accounts.get(ACCOUNT_ID)
         positions = acc_detail.positions
-        
-        # TickerAll uses list_pending
         orders = client.orders.list_pending(ACCOUNT_ID) 
         
         risky_trades = sum(1 for pos in positions if not is_position_risk_free(pos)) + len(orders)
@@ -208,7 +206,6 @@ def check_pair(yf_symbol, mt5_symbol):
         print(f"⚠️ Error checking positions/orders: {e}")
         return 
 
-    # FETCH YFINANCE DATA (Fixed for MultiIndex)
     try:
         ticker = yf.Ticker(yf_symbol)
         df = ticker.history(period="5d", interval="15m")
@@ -218,15 +215,11 @@ def check_pair(yf_symbol, mt5_symbol):
         print(f"⚠️ Data Error: {e}")
         return
     
-    if len(df) < 50: 
-        print("⚠️ Not enough historical data.")
-        return
+    if len(df) < 50: return
 
     current_price = live_price if live_price is not None else df['Close'].iloc[-1]
-    
     sl_buffer = 0.020 if "JPY" in mt5_symbol else (0.20 if mt5_symbol == "XAUUSDm" else 0.00020)
 
-    # H1 Data Fetch (Fixed for MultiIndex)
     try:
         df_h1 = ticker.history(period="2d", interval="1h")
         if isinstance(df_h1.columns, pd.MultiIndex):
@@ -240,78 +233,120 @@ def check_pair(yf_symbol, mt5_symbol):
     major_high = df['High'].iloc[-50:].max()
     major_low = df['Low'].iloc[-50:].min()
 
-    # STRATEGY 1: SMC
+    # ==========================================
+    # STRATEGY 1: SMC (Fair Value Gap) -> LIMIT ORDER
+    # ==========================================
     c1_high = df['High'].iloc[-3]; c1_low = df['Low'].iloc[-3]
     c3_high = df['High'].iloc[-1]; c3_low = df['Low'].iloc[-1]
+    
     if (c3_low > c1_high) and h1_bullish:
-        print("🟢 SMC Bullish FVG")
-        poi_price = c1_high; sl = df['Low'].iloc[-3:].min() - sl_buffer
-        risk = poi_price - sl
-        tp = max(major_high, poi_price + (risk * MIN_RR_RATIO))
-        execute_trade(mt5_symbol, "buy", poi_price, sl, tp); return 
+        print("🟢 SMC Bullish FVG -> Placing Limit Order at POI")
+        poi_price = c1_high
+        sl = df['Low'].iloc[-3:].min() - sl_buffer
+        execute_trade(mt5_symbol, "buy", "limit", poi_price, sl, major_high); return 
+        
     elif (c3_high < c1_low) and not h1_bullish:
-        print("🔴 SMC Bearish FVG")
-        poi_price = c1_low; sl = df['High'].iloc[-3:].max() + sl_buffer
-        risk = sl - poi_price
-        tp = min(major_low, poi_price - (risk * MIN_RR_RATIO))
-        execute_trade(mt5_symbol, "sell", poi_price, sl, tp); return
+        print("🔴 SMC Bearish FVG -> Placing Limit Order at POI")
+        poi_price = c1_low
+        sl = df['High'].iloc[-3:].max() + sl_buffer
+        execute_trade(mt5_symbol, "sell", "limit", poi_price, sl, major_low); return
 
-    # STRATEGY 2: B&R
+    # ==========================================
+    # STRATEGY 2: Break & Retest -> LIMIT ORDER
+    # ==========================================
     recent_high = df['High'].iloc[-25:-1].max(); recent_low = df['Low'].iloc[-25:-1].min()
     prev_close = df['Close'].iloc[-2]; curr_open = df['Open'].iloc[-1]; curr_close = df['Close'].iloc[-1]
     curr_low = df['Low'].iloc[-1]; curr_high = df['High'].iloc[-1]
+    
     if (prev_close > recent_high) and (curr_low <= recent_high) and (curr_close > curr_open) and h1_bullish:
-        print("🟢 Bullish B&R")
+        print("🟢 Bullish B&R -> Placing Limit Order at Retest Level")
         sl = curr_low - sl_buffer
-        risk = current_price - sl
-        tp = max(major_high, current_price + (risk * MIN_RR_RATIO))
-        execute_trade(mt5_symbol, "buy", current_price, sl, tp); return
+        execute_trade(mt5_symbol, "buy", "limit", recent_high, sl, major_high); return
+        
     elif (prev_close < recent_low) and (curr_high >= recent_low) and (curr_close < curr_open) and not h1_bullish:
-        print("🔴 Bearish B&R")
+        print("🔴 Bearish B&R -> Placing Limit Order at Retest Level")
         sl = curr_high + sl_buffer
-        risk = sl - current_price
-        tp = min(major_low, current_price - (risk * MIN_RR_RATIO))
-        execute_trade(mt5_symbol, "sell", current_price, sl, tp); return
+        execute_trade(mt5_symbol, "sell", "limit", recent_low, sl, major_low); return
 
-    # STRATEGY 3: APA
+    # ==========================================
+    # STRATEGY 3: APA -> MARKET ORDER (Immediate Entry)
+    # ==========================================
     body_size = abs(curr_close - curr_open); lower_wick = min(curr_open, curr_close) - curr_low; upper_wick = curr_high - max(curr_open, curr_close)
     prev_open = df['Open'].iloc[-2]
+    
     if ((lower_wick > (body_size * 2)) and (upper_wick < body_size) and (curr_close > curr_open) or (prev_close < prev_open) and (curr_close > curr_open) and (curr_close > prev_open) and (curr_open < prev_close)) and h1_bullish:
-        print("🟢 APA Bullish")
+        print("🟢 APA Bullish -> Placing Market Order")
         sl = curr_low - sl_buffer
-        risk = current_price - sl
-        tp = max(major_high, current_price + (risk * MIN_RR_RATIO))
-        execute_trade(mt5_symbol, "buy", current_price, sl, tp); return
+        execute_trade(mt5_symbol, "buy", "market", current_price, sl, major_high); return
+        
     elif ((upper_wick > (body_size * 2)) and (lower_wick < body_size) and (curr_close < curr_open) or (prev_close > prev_open) and (curr_close < curr_open) and (curr_close < prev_open) and (curr_open > prev_close)) and not h1_bullish:
-        print("🔴 APA Bearish")
+        print("🔴 APA Bearish -> Placing Market Order")
         sl = curr_high + sl_buffer
-        risk = sl - current_price
-        tp = min(major_low, current_price - (risk * MIN_RR_RATIO))
-        execute_trade(mt5_symbol, "sell", current_price, sl, tp); return
+        execute_trade(mt5_symbol, "sell", "market", current_price, sl, major_low); return
 
     print("No clear setup right now.")
 
 # --- HELPER FUNCTION TO PLACE TRADE (TICKERALL) ---
-def execute_trade(symbol, side, price, sl, tp):
+def execute_trade(symbol, side, order_type, entry_price, sl, original_major_target):
     current_lot = LOT_SIZES.get(symbol, DEFAULT_LOT_SIZE)
-    
-    # FIX: TickerAll requires uppercase "BUY" or "SELL" and a market order
     order_side = "BUY" if side.lower() == "buy" else "SELL"
     
-    print(f"🎯 Placing {order_side} {symbol} at Market | Lots: {current_lot} | SL: {sl:.5f} | TP: {tp:.5f}")
+    # Calculate exact risk based on the entry price
+    risk_distance = abs(entry_price - sl)
+    
+    if order_side == "BUY":
+        tp = max(original_major_target, entry_price + (risk_distance * MIN_RR_RATIO))
+    else:
+        tp = min(original_major_target, entry_price - (risk_distance * MIN_RR_RATIO))
+
+    print(f"🎯 Placing {order_side} {symbol} via {order_type.upper()} | Entry: {entry_price:.5f} | Lots: {current_lot} | SL: {sl:.5f} | TP: {tp:.5f}")
+    
     try:
-        client.orders.place(
-            account_id=ACCOUNT_ID, 
-            symbol=symbol, 
-            side=order_side, 
-            type="market", 
-            volume=float(current_lot),
-            stop_loss=float(f"{sl:.5f}"), 
-            take_profit=float(f"{tp:.5f}")
-        )
-        print("✅ ORDER PLACED!")
+        if order_type == "limit":
+            # Try placing the Limit Order
+            client.orders.place(
+                account_id=ACCOUNT_ID, 
+                symbol=symbol, 
+                side=order_side, 
+                type="limit", 
+                volume=float(current_lot), 
+                price=float(f"{entry_price:.5f}"),
+                stop_loss=float(f"{sl:.5f}"), 
+                take_profit=float(f"{tp:.5f}")
+            )
+            print("✅ LIMIT ORDER PLACED!")
+            
+        else: # Market Order
+            client.orders.place(
+                account_id=ACCOUNT_ID, 
+                symbol=symbol, 
+                side=order_side, 
+                type="market", 
+                volume=float(current_lot), 
+                stop_loss=float(f"{sl:.5f}"), 
+                take_profit=float(f"{tp:.5f}")
+            )
+            print("✅ MARKET ORDER PLACED!")
+
     except Exception as e:
-        print("Trade Error:", e)
+        # If the Limit Order fails, catch the error and fallback to Market
+        if order_type == "limit":
+            print(f"⚠️ Limit Order rejected ({e}). Falling back to Market Order...")
+            try:
+                client.orders.place(
+                    account_id=ACCOUNT_ID, 
+                    symbol=symbol, 
+                    side=order_side, 
+                    type="market", 
+                    volume=float(current_lot), 
+                    stop_loss=float(f"{sl:.5f}"), 
+                    take_profit=float(f"{tp:.5f}")
+                )
+                print("✅ FALLBACK MARKET ORDER PLACED!")
+            except Exception as fallback_error:
+                print("❌ Fallback Trade Error:", fallback_error)
+        else:
+            print("❌ Trade Error:", e)
 
 # --- MAIN RUN ---
 print("1. Managing open trades (Trailing Stop Engine)...")
