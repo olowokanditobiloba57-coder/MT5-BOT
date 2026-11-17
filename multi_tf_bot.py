@@ -88,7 +88,7 @@ def is_news_time():
         pass
     return False
 
-# --- PROP FIRM RULE CHECKER (FIXED) ---
+# --- PROP FIRM RULE CHECKER ---
 def check_prop_firm_rules():
     try:
         acc_detail = client.accounts.get(ACCOUNT_ID)
@@ -179,11 +179,13 @@ def check_pair(yf_symbol, mt5_symbol):
     except Exception:
         pass
 
-    # CHECK ACCOUNT & ORDERS (No more silent skipping)
+    # --- FIXED CHECK ACCOUNT & ORDERS ---
     try:
         acc_detail = client.accounts.get(ACCOUNT_ID)
         positions = acc_detail.positions
-        orders = client.orders.list(account_id=ACCOUNT_ID) # Added explicit kwarg
+        
+        # FIX: Use list_pending instead of list
+        orders = client.orders.list_pending(ACCOUNT_ID) 
         
         risky_trades = sum(1 for pos in positions if not is_position_risk_free(pos)) + len(orders)
         
@@ -204,7 +206,7 @@ def check_pair(yf_symbol, mt5_symbol):
                 return
     except Exception as e:
         print(f"⚠️ Error checking positions/orders: {e}")
-        return # Only return if we absolutely couldn't check account state
+        return
 
     try:
         ticker = yf.Ticker(yf_symbol)
