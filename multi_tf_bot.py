@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 # --- CONFIGURATION & AUTO-CONNECT ---
 MIN_RR_RATIO = 3.0
 
-# Get credentials from GitHub Secrets
 API_KEY = os.getenv("TICKERALL_API_KEY")
 MT5_LOGIN = os.getenv("MT5_LOGIN")
 MT5_PASSWORD = os.getenv("MT5_PASSWORD")
@@ -23,7 +22,6 @@ if not all([API_KEY, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER]):
 client = Tickerall(api_key=API_KEY)
 print("Connecting to NairaProp account via TickerAll...")
 
-# Start a fresh session
 try:
     session = client.sessions.start(
         broker="mt5",
@@ -90,12 +88,13 @@ def is_news_time():
         pass
     return False
 
-# --- PROP FIRM RULE CHECKER ---
+# --- PROP FIRM RULE CHECKER (FIXED) ---
 def check_prop_firm_rules():
     try:
-        acc = client.accounts.get(ACCOUNT_ID)
-        balance = float(acc.balance)
-        equity = float(acc.equity)
+        acc_detail = client.accounts.get(ACCOUNT_ID)
+        acc_info = acc_detail.account
+        balance = float(acc_info.balance)
+        equity = float(acc_info.equity)
         
         current_daily_loss = ((balance - equity) / balance) if balance > 0 else 0
         total_loss = ((INITIAL_ACCOUNT_BALANCE - equity) / INITIAL_ACCOUNT_BALANCE) if INITIAL_ACCOUNT_BALANCE > 0 else 0
@@ -180,10 +179,11 @@ def check_pair(yf_symbol, mt5_symbol):
     except Exception:
         pass
 
+    # CHECK ACCOUNT & ORDERS (No more silent skipping)
     try:
         acc_detail = client.accounts.get(ACCOUNT_ID)
         positions = acc_detail.positions
-        orders = client.orders.list(ACCOUNT_ID)
+        orders = client.orders.list(account_id=ACCOUNT_ID) # Added explicit kwarg
         
         risky_trades = sum(1 for pos in positions if not is_position_risk_free(pos)) + len(orders)
         
@@ -197,19 +197,25 @@ def check_pair(yf_symbol, mt5_symbol):
                 return
                 
         for order in orders:
-            if order.symbol == mt5_symbol and getattr(order, 'state', '') == 'placed':
+            o_state = getattr(order, 'state', order.get('state') if isinstance(order, dict) else '')
+            o_symbol = getattr(order, 'symbol', order.get('symbol') if isinstance(order, dict) else '')
+            if o_symbol == mt5_symbol and str(o_state).lower() == 'placed':
                 print(f"Pending order exists. Skipping.")
                 return
-    except Exception:
-        return
+    except Exception as e:
+        print(f"⚠️ Error checking positions/orders: {e}")
+        return # Only return if we absolutely couldn't check account state
 
     try:
         ticker = yf.Ticker(yf_symbol)
         df = ticker.history(period="5d", interval="15m", multi_level_index=False)
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Data Error: {e}")
         return
     
-    if len(df) < 50: return
+    if len(df) < 50: 
+        print("⚠️ Not enough historical data.")
+        return
 
     current_price = live_price if live_price is not None else df['Close'].iloc[-1]
     
