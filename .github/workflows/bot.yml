@@ -1,9 +1,9 @@
 name: Run MT5 Bot
 
 on:
-  # push:
-  # schedule:
-  #   - cron: "*/15 * * * *"
+  push:
+  schedule:
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -22,9 +22,10 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install fxapis yfinance pandas numpy forexfactory
+        pip install tickerall yfinance pandas numpy forexfactory
 
     - name: Run the bot
       env:
-        FXAPIS_API_KEY: ${{ secrets.FXAPIS_API_KEY }}
+        TICKERALL_API_KEY: ${{ secrets.TICKERALL_API_KEY }}
+        TICKERALL_ACCOUNT_ID: ${{ secrets.TICKERALL_ACCOUNT_ID }}
       run: python multi_tf_bot.py
