@@ -64,13 +64,28 @@ PAIRS = [
 
 print("Starting Advanced SMC Bot (Smart Execution Engine)...")
 
+# --- HELPER FUNCTION: SAFE ATTRIBUTE EXTRACTION ---
+def get_pos_attr(pos, names, default=None):
+    """Safely checks multiple possible attribute names for TickerAll Position objects."""
+    for name in names:
+        if hasattr(pos, name):
+            val = getattr(pos, name)
+            if val is not None:
+                return val
+    return default
+
 # --- HELPER FUNCTION: IS THE TRADE RISK-FREE? ---
 def is_position_risk_free(pos):
     try:
-        entry = float(pos.open_price)
-        sl = float(pos.stop_loss) if pos.stop_loss else 0.0
-        if pos.side.lower() == 'buy' and sl >= entry: return True
-        elif pos.side.lower() == 'sell' and sl <= entry and sl > 0: return True
+        entry = float(get_pos_attr(pos, ['open_price', 'price_open', 'openPrice'], 0.0))
+        sl = float(get_pos_attr(pos, ['stop_loss', 'sl', 'stopLoss'], 0.0) or 0.0)
+        side = str(get_pos_attr(pos, ['side', 'type'], '')).lower()
+        
+        if side == '0': side = 'buy'
+        elif side == '1': side = 'sell'
+        
+        if side == 'buy' and sl >= entry and entry > 0: return True
+        elif side == 'sell' and sl <= entry and sl > 0: return True
         return False
     except:
         return False
@@ -119,24 +134,28 @@ def manage_open_trades():
         positions = acc_detail.positions
         
         for pos in positions:
-            pos_ticket = getattr(pos, 'ticket', getattr(pos, 'id', None))
-            if not pos_ticket: continue
+            ticket = get_pos_attr(pos, ['ticket', 'id', 'position_id'])
+            if not ticket: continue
 
-            entry = float(pos.open_price)
-            tp = float(pos.take_profit) if pos.take_profit else 0.0
-            current_price = float(pos.current_price)
-            current_sl = float(pos.stop_loss) if pos.stop_loss else 0.0
+            entry = float(get_pos_attr(pos, ['open_price', 'price_open', 'openPrice'], 0.0))
+            current_price = float(get_pos_attr(pos, ['current_price', 'price_current', 'priceCurrent'], 0.0))
+            tp = float(get_pos_attr(pos, ['take_profit', 'tp', 'takeProfit'], 0.0) or 0.0)
+            current_sl = float(get_pos_attr(pos, ['stop_loss', 'sl', 'stopLoss'], 0.0) or 0.0)
+            symbol = str(get_pos_attr(pos, ['symbol', 'instrument'], ''))
             
-            if current_sl == 0.0 or tp == 0.0: continue
+            side = str(get_pos_attr(pos, ['side', 'type'], '')).lower()
+            if side == '0': side = 'buy'
+            elif side == '1': side = 'sell'
+
+            if current_sl == 0.0 or tp == 0.0 or entry == 0.0 or current_price == 0.0: continue
                 
-            # Estimate original risk based on the TP distance and minimum RR
             original_risk = abs(tp - entry) / MIN_RR_RATIO
             
-            if "JPY" in pos.symbol: buffer = 0.015
-            elif pos.symbol == "XAUUSDm": buffer = 0.15
+            if "JPY" in symbol: buffer = 0.015
+            elif symbol == "XAUUSDm": buffer = 0.15
             else: buffer = 0.00015
                 
-            if pos.side.lower() == 'buy':
+            if side == 'buy':
                 profit_r = (current_price - entry) / original_risk
                 new_sl = current_sl
                 
@@ -146,10 +165,10 @@ def manage_open_trades():
                 elif profit_r >= 2.5 and current_sl < (entry + (original_risk * 1.5)): new_sl = entry + (original_risk * 1.5) + buffer
 
                 if new_sl > current_sl and new_sl < current_price:
-                    print(f"🛡️ Trailing SL for {pos.symbol} to lock in profit (Current: {profit_r:.2f}R)")
-                    client.positions.modify(ACCOUNT_ID, ticket=pos_ticket, stop_loss=f"{new_sl:.5f}")
+                    print(f"🛡️ Trailing SL for {symbol} to lock in profit (Current: {profit_r:.2f}R)")
+                    client.positions.modify(ACCOUNT_ID, ticket=ticket, stop_loss=f"{new_sl:.5f}")
                         
-            elif pos.side.lower() == 'sell':
+            elif side == 'sell':
                 profit_r = (entry - current_price) / original_risk
                 new_sl = current_sl
                 
@@ -159,8 +178,8 @@ def manage_open_trades():
                 elif profit_r >= 2.5 and current_sl > (entry - (original_risk * 1.5)): new_sl = entry - (original_risk * 1.5) - buffer
 
                 if (new_sl < current_sl or current_sl == 0) and new_sl > current_price:
-                    print(f"🛡️ Trailing SL for {pos.symbol} to lock in profit (Current: {profit_r:.2f}R)")
-                    client.positions.modify(ACCOUNT_ID, ticket=pos_ticket, stop_loss=f"{new_sl:.5f}")
+                    print(f"🛡️ Trailing SL for {symbol} to lock in profit (Current: {profit_r:.2f}R)")
+                    client.positions.modify(ACCOUNT_ID, ticket=ticket, stop_loss=f"{new_sl:.5f}")
     except Exception as e:
         print("Trade management error:", e)
 
@@ -192,7 +211,8 @@ def check_pair(yf_symbol, mt5_symbol):
             return
             
         for pos in positions:
-            if pos.symbol == mt5_symbol and not is_position_risk_free(pos):
+            pos_symbol = str(get_pos_attr(pos, ['symbol', 'instrument'], ''))
+            if pos_symbol == mt5_symbol and not is_position_risk_free(pos):
                 print(f"Already in a RISKY trade for {mt5_symbol}. Skipping.")
                 return
                 
@@ -291,7 +311,6 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
     current_lot = LOT_SIZES.get(symbol, DEFAULT_LOT_SIZE)
     order_side = "BUY" if side.lower() == "buy" else "SELL"
     
-    # Calculate exact risk based on the entry price
     risk_distance = abs(entry_price - sl)
     
     if order_side == "BUY":
@@ -303,7 +322,6 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
     
     try:
         if order_type == "limit":
-            # Try placing the Limit Order
             client.orders.place(
                 account_id=ACCOUNT_ID, 
                 symbol=symbol, 
@@ -315,8 +333,7 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
                 take_profit=float(f"{tp:.5f}")
             )
             print("✅ LIMIT ORDER PLACED!")
-            
-        else: # Market Order
+        else: 
             client.orders.place(
                 account_id=ACCOUNT_ID, 
                 symbol=symbol, 
@@ -329,7 +346,6 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
             print("✅ MARKET ORDER PLACED!")
 
     except Exception as e:
-        # If the Limit Order fails, catch the error and fallback to Market
         if order_type == "limit":
             print(f"⚠️ Limit Order rejected ({e}). Falling back to Market Order...")
             try:
