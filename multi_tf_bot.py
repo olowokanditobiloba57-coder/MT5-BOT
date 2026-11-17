@@ -7,9 +7,35 @@ from tickerall import Tickerall
 import forexfactory
 from datetime import datetime, timedelta
 
-# --- CONFIGURATION ---
-ACCOUNT_ID = os.getenv("TICKERALL_ACCOUNT_ID")
+# --- CONFIGURATION & AUTO-CONNECT ---
 MIN_RR_RATIO = 3.0
+
+# Get credentials from GitHub Secrets
+API_KEY = os.getenv("TICKERALL_API_KEY")
+MT5_LOGIN = os.getenv("MT5_LOGIN")
+MT5_PASSWORD = os.getenv("MT5_PASSWORD")
+MT5_SERVER = os.getenv("MT5_SERVER")
+
+if not all([API_KEY, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER]):
+    print("ERROR: Missing MT5 or TickerAll credentials in GitHub Secrets.")
+    exit(1)
+
+client = Tickerall(api_key=API_KEY)
+print("Connecting to NairaProp account via TickerAll...")
+
+# Start a fresh session
+try:
+    session = client.sessions.start(
+        broker="mt5",
+        server=MT5_SERVER,
+        account=int(MT5_LOGIN),
+        password=MT5_PASSWORD
+    )
+    ACCOUNT_ID = session.account_id
+    print(f"✅ Connected! Account ID: {ACCOUNT_ID}")
+except Exception as e:
+    print(f"❌ Failed to connect to broker: {e}")
+    exit(1)
 
 # --- SAFETY LIMITS ---
 MAX_OPEN_TRADES = 2  
@@ -38,12 +64,7 @@ PAIRS = [
     ("GC=F", "XAUUSDm")     
 ]
 
-if not ACCOUNT_ID:
-    print("ERROR: TICKERALL_ACCOUNT_ID is missing. Please add it to your GitHub Secrets.")
-    exit(1)
-
-client = Tickerall(api_key=os.getenv("TICKERALL_API_KEY"))
-print("Starting Advanced SMC Bot (TickerAll Engine)...")
+print("Starting Advanced SMC Bot (Auto-Connect Engine)...")
 
 # --- HELPER FUNCTION: IS THE TRADE RISK-FREE? ---
 def is_position_risk_free(pos):
@@ -99,7 +120,6 @@ def manage_open_trades():
         positions = acc_detail.positions
         
         for pos in positions:
-            # Handle both ticket and id depending on SDK version
             pos_ticket = getattr(pos, 'ticket', getattr(pos, 'id', None))
             if not pos_ticket: continue
 
@@ -180,12 +200,11 @@ def check_pair(yf_symbol, mt5_symbol):
             if order.symbol == mt5_symbol and getattr(order, 'state', '') == 'placed':
                 print(f"Pending order exists. Skipping.")
                 return
-    except Exception as e:
+    except Exception:
         return
 
     try:
         ticker = yf.Ticker(yf_symbol)
-        # Added multi_level_index=False to fix yfinance Pandas error
         df = ticker.history(period="5d", interval="15m", multi_level_index=False)
     except Exception:
         return
