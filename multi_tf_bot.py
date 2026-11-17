@@ -179,12 +179,12 @@ def check_pair(yf_symbol, mt5_symbol):
     except Exception:
         pass
 
-    # --- FIXED CHECK ACCOUNT & ORDERS ---
+    # CHECK ACCOUNT & ORDERS
     try:
         acc_detail = client.accounts.get(ACCOUNT_ID)
         positions = acc_detail.positions
         
-        # FIX: Use list_pending instead of list
+        # TickerAll uses list_pending
         orders = client.orders.list_pending(ACCOUNT_ID) 
         
         risky_trades = sum(1 for pos in positions if not is_position_risk_free(pos)) + len(orders)
@@ -206,11 +206,14 @@ def check_pair(yf_symbol, mt5_symbol):
                 return
     except Exception as e:
         print(f"⚠️ Error checking positions/orders: {e}")
-        return
+        return 
 
+    # FETCH YFINANCE DATA (Fixed)
     try:
         ticker = yf.Ticker(yf_symbol)
-        df = ticker.history(period="5d", interval="15m", multi_level_index=False)
+        df = ticker.history(period="5d", interval="15m")
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
     except Exception as e:
         print(f"⚠️ Data Error: {e}")
         return
@@ -223,7 +226,14 @@ def check_pair(yf_symbol, mt5_symbol):
     
     sl_buffer = 0.020 if "JPY" in mt5_symbol else (0.20 if mt5_symbol == "XAUUSDm" else 0.00020)
 
-    df_h1 = ticker.history(period="2d", interval="1h", multi_level_index=False)
+    # H1 Data Fetch (Fixed)
+    try:
+        df_h1 = ticker.history(period="2d", interval="1h")
+        if isinstance(df_h1.columns, pd.MultiIndex):
+            df_h1.columns = df_h1.columns.get_level_values(0)
+    except Exception:
+        return
+
     df_h1['EMA_50'] = df_h1['Close'].ewm(span=50, adjust=False).mean()
     h1_bullish = df_h1['Close'].iloc[-1] > df_h1['EMA_50'].iloc[-1]
 
