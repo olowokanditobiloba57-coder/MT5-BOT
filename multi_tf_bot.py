@@ -208,7 +208,7 @@ def check_pair(yf_symbol, mt5_symbol):
         print(f"⚠️ Error checking positions/orders: {e}")
         return 
 
-    # FETCH YFINANCE DATA (Fixed)
+    # FETCH YFINANCE DATA (Fixed for MultiIndex)
     try:
         ticker = yf.Ticker(yf_symbol)
         df = ticker.history(period="5d", interval="15m")
@@ -226,7 +226,7 @@ def check_pair(yf_symbol, mt5_symbol):
     
     sl_buffer = 0.020 if "JPY" in mt5_symbol else (0.20 if mt5_symbol == "XAUUSDm" else 0.00020)
 
-    # H1 Data Fetch (Fixed)
+    # H1 Data Fetch (Fixed for MultiIndex)
     try:
         df_h1 = ticker.history(period="2d", interval="1h")
         if isinstance(df_h1.columns, pd.MultiIndex):
@@ -295,15 +295,17 @@ def check_pair(yf_symbol, mt5_symbol):
 def execute_trade(symbol, side, price, sl, tp):
     current_lot = LOT_SIZES.get(symbol, DEFAULT_LOT_SIZE)
     
-    print(f"🎯 Placing {side.upper()} {symbol} at {price:.5f} | Lots: {current_lot} | SL: {sl:.5f} | TP: {tp:.5f}")
+    # FIX: TickerAll requires uppercase "BUY" or "SELL" and a market order
+    order_side = "BUY" if side.lower() == "buy" else "SELL"
+    
+    print(f"🎯 Placing {order_side} {symbol} at Market | Lots: {current_lot} | SL: {sl:.5f} | TP: {tp:.5f}")
     try:
         client.orders.place(
             account_id=ACCOUNT_ID, 
             symbol=symbol, 
-            side=side, 
-            type="limit", 
+            side=order_side, 
+            type="market", 
             volume=float(current_lot),
-            price=float(f"{price:.5f}"), 
             stop_loss=float(f"{sl:.5f}"), 
             take_profit=float(f"{tp:.5f}")
         )
