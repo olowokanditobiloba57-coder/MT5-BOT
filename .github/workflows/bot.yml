@@ -27,5 +27,7 @@ jobs:
     - name: Run the bot
       env:
         TICKERALL_API_KEY: ${{ secrets.TICKERALL_API_KEY }}
-        TICKERALL_ACCOUNT_ID: ${{ secrets.TICKERALL_ACCOUNT_ID }}
+        MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
+        MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+        MT5_SERVER: ${{ secrets.MT5_SERVER }}
       run: python multi_tf_bot.py
