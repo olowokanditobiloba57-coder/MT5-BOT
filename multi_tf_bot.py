@@ -9,17 +9,17 @@ from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
 ACCOUNT_ID = os.getenv("TICKERALL_ACCOUNT_ID")
-MIN_RR_RATIO = 3.0  # Minimum 1:3 Risk-to-Reward
+MIN_RR_RATIO = 3.0
 
 # --- SAFETY LIMITS ---
 MAX_OPEN_TRADES = 2  
 
-# --- FIXED LOT SIZES (Updated for Exness 'm' suffix) ---
+# --- FIXED LOT SIZES (Exness 'm' suffix) ---
 LOT_SIZES = {
     "EURUSDm": "0.05",   
     "GBPUSDm": "0.05",   
     "GBPJPYm": "0.02",   
-    "AUDJPYm": "0.02",   # Added AUDJPYm back
+    "AUDJPYm": "0.02",
     "XAUUSDm": "0.01"    
 }
 DEFAULT_LOT_SIZE = "0.01"
@@ -30,12 +30,11 @@ MAX_LOSS_LIMIT_PERCENT = 0.06
 INITIAL_ACCOUNT_BALANCE = 1500000.00 
 ALLOW_NEWS_TRADING = True        
 
-# --- PAIRS (Updated MT5 symbols with 'm') ---
 PAIRS = [
     ("EURUSD=X", "EURUSDm"),
     ("GBPUSD=X", "GBPUSDm"),
     ("GBPJPY=X", "GBPJPYm"),
-    ("AUDJPY=X", "AUDJPYm"), # Added AUDJPYm back
+    ("AUDJPY=X", "AUDJPYm"),
     ("GC=F", "XAUUSDm")     
 ]
 
@@ -43,17 +42,16 @@ if not ACCOUNT_ID:
     print("ERROR: TICKERALL_ACCOUNT_ID is missing. Please add it to your GitHub Secrets.")
     exit(1)
 
-# Initialize TickerAll Client
 client = Tickerall(api_key=os.getenv("TICKERALL_API_KEY"))
-print("Starting Advanced SMC Bot (TickerAll Engine with Exness 'm' suffixes)...")
+print("Starting Advanced SMC Bot (TickerAll Engine)...")
 
 # --- HELPER FUNCTION: IS THE TRADE RISK-FREE? ---
 def is_position_risk_free(pos):
     try:
-        entry = float(pos['open_price'])
-        sl = float(pos['stop_loss']) if pos.get('stop_loss') else 0.0
-        if pos['side'].lower() == 'buy' and sl >= entry: return True
-        elif pos['side'].lower() == 'sell' and sl <= entry and sl > 0: return True
+        entry = float(pos.open_price)
+        sl = float(pos.stop_loss) if pos.stop_loss else 0.0
+        if pos.side.lower() == 'buy' and sl >= entry: return True
+        elif pos.side.lower() == 'sell' and sl <= entry and sl > 0: return True
         return False
     except:
         return False
@@ -75,11 +73,13 @@ def is_news_time():
 def check_prop_firm_rules():
     try:
         acc = client.accounts.get(ACCOUNT_ID)
-        balance = float(acc['balance'])
-        equity = float(acc['equity'])
+        balance = float(acc.balance)
+        equity = float(acc.equity)
         
         current_daily_loss = ((balance - equity) / balance) if balance > 0 else 0
         total_loss = ((INITIAL_ACCOUNT_BALANCE - equity) / INITIAL_ACCOUNT_BALANCE) if INITIAL_ACCOUNT_BALANCE > 0 else 0
+        
+        print(f"📊 Account: Balance={balance:.2f}, Equity={equity:.2f}")
         
         if current_daily_loss >= DAILY_LOSS_LIMIT_PERCENT:
             print(f"🛑 DAILY LOSS BREACH: Stopping all new trades.")
@@ -95,23 +95,28 @@ def check_prop_firm_rules():
 # --- TRADE MANAGEMENT (TRAILING STOP ENGINE) ---
 def manage_open_trades():
     try:
-        positions = client.positions.list(ACCOUNT_ID)
+        acc_detail = client.accounts.get(ACCOUNT_ID)
+        positions = acc_detail.positions
+        
         for pos in positions:
-            entry = float(pos['open_price'])
-            tp = float(pos['take_profit']) if pos.get('take_profit') else 0.0
-            current_price = float(pos['current_price'])
-            current_sl = float(pos['stop_loss']) if pos.get('stop_loss') else 0.0
+            # Handle both ticket and id depending on SDK version
+            pos_ticket = getattr(pos, 'ticket', getattr(pos, 'id', None))
+            if not pos_ticket: continue
+
+            entry = float(pos.open_price)
+            tp = float(pos.take_profit) if pos.take_profit else 0.0
+            current_price = float(pos.current_price)
+            current_sl = float(pos.stop_loss) if pos.stop_loss else 0.0
             
             if current_sl == 0.0 or tp == 0.0: continue
                 
             original_risk = abs(tp - entry) / MIN_RR_RATIO
             
-            # Buffer logic updated for 'm' suffix
-            if "JPY" in pos['symbol']: buffer = 0.015
-            elif pos['symbol'] == "XAUUSDm": buffer = 0.15
+            if "JPY" in pos.symbol: buffer = 0.015
+            elif pos.symbol == "XAUUSDm": buffer = 0.15
             else: buffer = 0.00015
                 
-            if pos['side'].lower() == 'buy':
+            if pos.side.lower() == 'buy':
                 profit_r = (current_price - entry) / original_risk
                 new_sl = current_sl
                 
@@ -121,10 +126,10 @@ def manage_open_trades():
                 elif profit_r >= 2.5 and current_sl < (entry + (original_risk * 1.5)): new_sl = entry + (original_risk * 1.5) + buffer
 
                 if new_sl > current_sl and new_sl < current_price:
-                    print(f"🛡️ Trailing SL for {pos['symbol']} to lock in profit (Current: {profit_r:.2f}R)")
-                    client.positions.modify(ACCOUNT_ID, pos['id'], stop_loss=f"{new_sl:.5f}")
+                    print(f"🛡️ Trailing SL for {pos.symbol} to lock in profit (Current: {profit_r:.2f}R)")
+                    client.positions.modify(ACCOUNT_ID, ticket=pos_ticket, stop_loss=f"{new_sl:.5f}")
                         
-            elif pos['side'].lower() == 'sell':
+            elif pos.side.lower() == 'sell':
                 profit_r = (entry - current_price) / original_risk
                 new_sl = current_sl
                 
@@ -134,8 +139,8 @@ def manage_open_trades():
                 elif profit_r >= 2.5 and current_sl > (entry - (original_risk * 1.5)): new_sl = entry - (original_risk * 1.5) - buffer
 
                 if (new_sl < current_sl or current_sl == 0) and new_sl > current_price:
-                    print(f"🛡️ Trailing SL for {pos['symbol']} to lock in profit (Current: {profit_r:.2f}R)")
-                    client.positions.modify(ACCOUNT_ID, pos['id'], stop_loss=f"{new_sl:.5f}")
+                    print(f"🛡️ Trailing SL for {pos.symbol} to lock in profit (Current: {profit_r:.2f}R)")
+                    client.positions.modify(ACCOUNT_ID, ticket=pos_ticket, stop_loss=f"{new_sl:.5f}")
     except Exception as e:
         print("Trade management error:", e)
 
@@ -148,15 +153,16 @@ def check_pair(yf_symbol, mt5_symbol):
         quote = client.quotes.get(ACCOUNT_ID, mt5_symbol)
         if quote:
             q = quote[0] if isinstance(quote, list) else quote
-            ask = q.get('ask')
-            bid = q.get('bid')
+            ask = q.get('ask') if isinstance(q, dict) else getattr(q, 'ask', None)
+            bid = q.get('bid') if isinstance(q, dict) else getattr(q, 'bid', None)
             if ask: live_price = float(ask)
             elif bid: live_price = float(bid)
     except Exception:
         pass
 
     try:
-        positions = client.positions.list(ACCOUNT_ID)
+        acc_detail = client.accounts.get(ACCOUNT_ID)
+        positions = acc_detail.positions
         orders = client.orders.list(ACCOUNT_ID)
         
         risky_trades = sum(1 for pos in positions if not is_position_risk_free(pos)) + len(orders)
@@ -166,20 +172,21 @@ def check_pair(yf_symbol, mt5_symbol):
             return
             
         for pos in positions:
-            if pos['symbol'] == mt5_symbol and not is_position_risk_free(pos):
+            if pos.symbol == mt5_symbol and not is_position_risk_free(pos):
                 print(f"Already in a RISKY trade for {mt5_symbol}. Skipping.")
                 return
                 
         for order in orders:
-            if order['symbol'] == mt5_symbol and order.get('state') == 'placed':
+            if order.symbol == mt5_symbol and getattr(order, 'state', '') == 'placed':
                 print(f"Pending order exists. Skipping.")
                 return
-    except Exception:
+    except Exception as e:
         return
 
     try:
         ticker = yf.Ticker(yf_symbol)
-        df = ticker.history(period="5d", interval="15m")
+        # Added multi_level_index=False to fix yfinance Pandas error
+        df = ticker.history(period="5d", interval="15m", multi_level_index=False)
     except Exception:
         return
     
@@ -187,10 +194,9 @@ def check_pair(yf_symbol, mt5_symbol):
 
     current_price = live_price if live_price is not None else df['Close'].iloc[-1]
     
-    # SL Buffer logic updated for 'm' suffix
     sl_buffer = 0.020 if "JPY" in mt5_symbol else (0.20 if mt5_symbol == "XAUUSDm" else 0.00020)
 
-    df_h1 = ticker.history(period="2d", interval="1h")
+    df_h1 = ticker.history(period="2d", interval="1h", multi_level_index=False)
     df_h1['EMA_50'] = df_h1['Close'].ewm(span=50, adjust=False).mean()
     h1_bullish = df_h1['Close'].iloc[-1] > df_h1['EMA_50'].iloc[-1]
 
