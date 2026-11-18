@@ -62,7 +62,7 @@ PAIRS = [
     ("GC=F", "XAUUSDm")     
 ]
 
-print("Starting Advanced SMC Bot (Smart Execution & Order Validation)...")
+print("Starting Advanced SMC Bot (Smart Execution & Global Risk Validator)...")
 
 # --- HELPER FUNCTION: SAFE ATTRIBUTE EXTRACTION ---
 def get_pos_attr(pos, names, default=None):
@@ -185,6 +185,7 @@ def manage_open_trades():
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ---")
     
+    # 1. GET LIVE PRICE
     live_price = None
     try:
         quote = client.quotes.get(ACCOUNT_ID, mt5_symbol)
@@ -197,7 +198,7 @@ def check_pair(yf_symbol, mt5_symbol):
     except Exception:
         pass
 
-    # FETCH H1 TREND FIRST (Needed for order validation)
+    # 2. FETCH H1 DATA FOR TREND
     try:
         ticker = yf.Ticker(yf_symbol)
         df_h1 = ticker.history(period="2d", interval="1h")
@@ -211,15 +212,16 @@ def check_pair(yf_symbol, mt5_symbol):
 
     check_price = live_price if live_price is not None else 0 
 
-    # --- VALIDATE PENDING ORDERS ---
+    # 3. GLOBAL VALIDATION: CHECK ALL PENDING ORDERS & POSITIONS
     try:
-        orders = client.orders.list_pending(ACCOUNT_ID)
-        valid_pending_orders = 0
+        all_pending_orders = client.orders.list_pending(ACCOUNT_ID)
+        acc_detail = client.accounts.get(ACCOUNT_ID)
+        positions = acc_detail.positions
         
-        for order in orders:
+        # A. Clean up invalid pending orders and count valid ones
+        valid_pending_orders = []
+        for order in all_pending_orders:
             o_symbol = str(getattr(order, 'symbol', order.get('symbol') if isinstance(order, dict) else ''))
-            if o_symbol != mt5_symbol: continue
-            
             o_state = str(getattr(order, 'state', order.get('state') if isinstance(order, dict) else '')).lower()
             if o_state != 'placed': continue
 
@@ -230,63 +232,51 @@ def check_pair(yf_symbol, mt5_symbol):
             is_valid = True
             reason = ""
             
-            # Rule 1: H1 Trend Flip
+            # Check trend flip
             if o_side == 'sell' and h1_bullish:
-                is_valid = False
-                reason = "H1 trend flipped Bullish"
+                is_valid = False; reason = "H1 trend flipped Bullish"
             elif o_side == 'buy' and not h1_bullish:
-                is_valid = False
-                reason = "H1 trend flipped Bearish"
-                
-            # Rule 2: Price blew past the Stop Loss without triggering entry
+                is_valid = False; reason = "H1 trend flipped Bearish"
+            # Check if price blew past SL
             elif check_price > 0 and o_sl > 0:
                 if o_side == 'sell' and check_price > o_sl:
-                    is_valid = False
-                    reason = "Price blew past the Stop Loss"
+                    is_valid = False; reason = "Price blew past Stop Loss"
                 elif o_side == 'buy' and check_price < o_sl:
-                    is_valid = False
-                    reason = "Price blew past the Stop Loss"
+                    is_valid = False; reason = "Price blew past Stop Loss"
 
             if not is_valid and o_id:
-                print(f"🗑️ Canceling INVALID {o_side.upper()} limit. Reason: {reason}")
+                print(f"🗑️ Canceling INVALID {o_side.upper()} limit on {o_symbol}. Reason: {reason}")
                 try:
                     client.orders.cancel(account_id=ACCOUNT_ID, order_id=o_id)
-                    print(f"✅ Order canceled. Looking for new setups...")
                 except Exception as e:
                     print(f"⚠️ Failed to cancel order: {e}")
-                    return 
             else:
-                valid_pending_orders += 1
-                
-        if valid_pending_orders > 0:
-            print(f"Pending order is still VALID. Waiting for price to trigger it.")
+                valid_pending_orders.append(o_symbol)
+
+        # B. Count total global risk (Risky Positions + Valid Pending Orders)
+        risky_positions = sum(1 for pos in positions if not is_position_risk_free(pos))
+        total_risky_exposure = risky_positions + len(valid_pending_orders)
+        
+        if total_risky_exposure >= MAX_OPEN_TRADES:
+            print(f"🛑 MAX RISKY EXPOSURE REACHED ({total_risky_exposure}/{MAX_OPEN_TRADES}). Skipping.")
             return
 
-    except Exception as e:
-        print(f"⚠️ Error checking pending orders: {e}")
-        return
-
-    # --- CHECK MAX LIMITS ---
-    try:
-        acc_detail = client.accounts.get(ACCOUNT_ID)
-        positions = acc_detail.positions
-        
-        risky_trades = sum(1 for pos in positions if not is_position_risk_free(pos))
-        
-        if risky_trades >= MAX_OPEN_TRADES:
-            print(f"🛑 MAX RISKY TRADES REACHED ({risky_trades}/{MAX_OPEN_TRADES}). Skipping.")
+        # C. Check if this specific pair already has a valid order or open position
+        if mt5_symbol in valid_pending_orders:
+            print(f"Valid pending order already exists for {mt5_symbol}. Skipping.")
             return
-            
+
         for pos in positions:
             pos_symbol = str(get_pos_attr(pos, ['symbol', 'instrument'], ''))
             if pos_symbol == mt5_symbol and not is_position_risk_free(pos):
                 print(f"Already in a RISKY trade for {mt5_symbol}. Skipping.")
                 return
+
     except Exception as e:
-        print(f"⚠️ Error checking positions: {e}")
+        print(f"⚠️ Error checking global risk: {e}")
         return
 
-    # --- FETCH M15 DATA & RUN STRATEGIES ---
+    # 4. FETCH M15 DATA & RUN STRATEGIES (If passed all global checks)
     try:
         df = ticker.history(period="5d", interval="15m")
         if isinstance(df.columns, pd.MultiIndex):
@@ -410,5 +400,5 @@ else:
         print("✅ Scanning pairs...")
         for yf_sym, mt5_sym in PAIRS:
             check_pair(yf_sym, mt5_sym)
-            time.sleep(10) # Increased to 10 seconds to prevent network timeouts
+            time.sleep(10) 
 print("\nFinished. Going back to sleep.")
