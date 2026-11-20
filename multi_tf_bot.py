@@ -17,6 +17,13 @@ if not all([API_KEY, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER]):
     print("ERROR: Missing MT5 or TickerAll credentials in GitHub Secrets.")
     exit(1)
 
+# --- WEEKEND FILTER ---
+now = datetime.now(timezone.utc)
+# Forex market closes Friday 21:00 UTC and opens Sunday 21:00 UTC
+if (now.weekday() == 5) or (now.weekday() == 6 and now.hour < 21) or (now.weekday() == 4 and now.hour >= 21):
+    print("🛑 WEEKEND DETECTED: Forex market is closed. Going back to sleep to protect account from gap risk.")
+    exit(0)
+
 client = Tickerall(api_key=API_KEY)
 print("Connecting to NairaProp account via TickerAll...")
 
@@ -61,18 +68,10 @@ PAIRS = [
 ]
 
 ENTRY_FIELD_NAMES = [
-    "entry_price",
-    "entry",
-    "open_price",
-    "price_open",
-    "openPrice",
-    "price",
-    "avg_price",
-    "average_price",
-    "open",
+    "entry_price", "entry", "open_price", "price_open", "openPrice", "price", "avg_price", "average_price", "open"
 ]
 
-print("Starting Advanced SMC Bot (Risk-Free Slots, 1 Pos/Pair, Trailing & Debug Logs)...")
+print("Starting Advanced SMC Bot (Live Prices, Strict Pair Limit, Trailing Stop)...")
 
 
 # --- HELPER FUNCTIONS ---
@@ -210,15 +209,11 @@ def manage_open_trades():
                 f"entry={entry} curr={current_price} sl={current_sl} tp={tp} risk_free={risk_free}"
             )
 
-            if entry <= 0.0:
-                print(f"   [DEBUG RawPos] {repr(pos)}")
-
             if not ticket or not symbol or side not in ("buy", "sell"):
-                print(f"   ⚠️ Skipping position due to missing ticket/symbol/side: ticket={ticket}, symbol={symbol}, side={side}")
+                print(f"   ⚠️ Skipping position due to missing ticket/symbol/side.")
                 continue
 
             if entry <= 0.0 or current_price <= 0.0:
-                print(f"   ⚠️ Skipping {symbol} (#{ticket}): invalid entry ({entry}) or current_price ({current_price})")
                 continue
 
             if current_sl > 0.0:
@@ -229,7 +224,6 @@ def manage_open_trades():
                 risk_distance = 0.0
 
             if risk_distance <= 0:
-                print(f"   ⚠️ Skipping {symbol} (#{ticket}): cannot determine risk_distance (sl={current_sl}, tp={tp})")
                 continue
 
             buf = get_pip_buffer(symbol, tier_step=1)
@@ -237,7 +231,7 @@ def manage_open_trades():
 
             if side == "buy":
                 profit_r = (current_price - entry) / risk_distance
-                print(f"   📈 {symbol} (#{ticket}) BUY profit_r={profit_r:.2f}R (risk_dist={risk_distance:.5f})")
+                print(f"   📈 {symbol} (#{ticket}) BUY profit_r={profit_r:.2f}R")
 
                 if profit_r >= 2.5:
                     candidate = max(entry + (risk_distance * 1.5) + buf, current_price - risk_distance)
@@ -254,15 +248,10 @@ def manage_open_trades():
                     formatted_candidate = fmt_price(symbol, candidate)
                     if formatted_candidate > current_sl and formatted_candidate < current_price:
                         new_sl = formatted_candidate
-                    else:
-                        print(
-                            f"   [DEBUG Trail Skip] {symbol} (#{ticket}) candidate={formatted_candidate} "
-                            f"vs current_sl={current_sl}, current_price={current_price}"
-                        )
 
             elif side == "sell":
                 profit_r = (entry - current_price) / risk_distance
-                print(f"   📉 {symbol} (#{ticket}) SELL profit_r={profit_r:.2f}R (risk_dist={risk_distance:.5f})")
+                print(f"   📉 {symbol} (#{ticket}) SELL profit_r={profit_r:.2f}R")
 
                 if profit_r >= 2.5:
                     candidate = min(entry - (risk_distance * 1.5) - buf, current_price + risk_distance)
@@ -280,19 +269,13 @@ def manage_open_trades():
                     sl_improves = (current_sl == 0.0) or (formatted_candidate < current_sl)
                     if sl_improves and formatted_candidate > current_price:
                         new_sl = formatted_candidate
-                    else:
-                        print(
-                            f"   [DEBUG Trail Skip] {symbol} (#{ticket}) candidate={formatted_candidate} "
-                            f"vs current_sl={current_sl}, current_price={current_price}"
-                        )
 
             if new_sl is not None:
                 try:
                     print(f"🛡️ Modifying SL for {symbol} (#{ticket}) from {current_sl} -> {new_sl}")
-                    res = client.positions.modify(ACCOUNT_ID, ticket=ticket, stop_loss=new_sl)
-                    print(f"   ✅ Modify response: {res}")
+                    client.positions.modify(ACCOUNT_ID, ticket=ticket, stop_loss=new_sl)
                 except Exception as mod_err:
-                    print(f"   ❌ Failed to modify SL for {symbol} (#{ticket}): {repr(mod_err)}")
+                    print(f"   ❌ Failed to modify SL: {repr(mod_err)}")
 
     except Exception as e:
         print(f"❌ Trade management error: {repr(e)}")
@@ -302,27 +285,40 @@ def manage_open_trades():
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ({yf_symbol}) ---")
 
-    # 1. FETCH H1 DATA FOR TREND
+    # 1. FETCH LIVE PRICE FROM TICKERALL
+    live_price = None
+    try:
+        quote = client.quotes.get(ACCOUNT_ID, mt5_symbol)
+        if quote:
+            q = quote[0] if isinstance(quote, list) else quote
+            ask = q.get('ask') if isinstance(q, dict) else getattr(q, 'ask', None)
+            bid = q.get('bid') if isinstance(q, dict) else getattr(q, 'bid', None)
+            if ask: live_price = float(ask)
+            elif bid: live_price = float(bid)
+            print(f"   📡 Live broker price for {mt5_symbol}: {live_price}")
+    except Exception as e:
+        print(f"   ⚠️ Live price fetch failed: {repr(e)}. Using yfinance.")
+
+    # 2. FETCH H1 DATA FOR TREND
     try:
         ticker = yf.Ticker(yf_symbol)
         df_h1 = ticker.history(period="2d", interval="1h")
         if isinstance(df_h1.columns, pd.MultiIndex):
             df_h1.columns = df_h1.columns.get_level_values(0)
         if df_h1.empty or len(df_h1) < 2:
-            print(f"⚠️ Insufficient H1 data for {yf_symbol}")
+            print(f"⚠️ Insufficient H1 data.")
             return
         df_h1["EMA_50"] = df_h1["Close"].ewm(span=50, adjust=False).mean()
         h1_close = float(df_h1["Close"].iloc[-1])
         h1_ema = float(df_h1["EMA_50"].iloc[-1])
         h1_bullish = h1_close > h1_ema
-        print(f"   [DEBUG H1] yf_close={h1_close:.5f}, ema50={h1_ema:.5f}, h1_bullish={h1_bullish}")
     except Exception as e:
         print(f"⚠️ H1 Data Error: {repr(e)}")
         return
 
-    check_price = h1_close
+    check_price = live_price if live_price is not None else h1_close
 
-    # 2. GLOBAL VALIDATION: RISK-FREE SLOT EXCLUSION + 1 ACTIVE POSITION PER PAIR
+    # 3. GLOBAL VALIDATION
     try:
         all_pending_orders = client.orders.list_pending(ACCOUNT_ID) or []
         acc_detail = client.accounts.get(ACCOUNT_ID)
@@ -335,8 +331,6 @@ def check_pair(yf_symbol, mt5_symbol):
             o_id = get_attr_safe(order, ["order_ticket", "ticket", "id"])
             o_side = normalize_side(get_attr_safe(order, ["side", "type"]))
             o_sl = float(get_attr_safe(order, ["stop_loss", "sl", "stopLoss"], 0.0) or 0.0)
-
-            print(f"   [DEBUG Pending] symbol={o_symbol} id={o_id} state={o_state} side={o_side} sl={o_sl}")
 
             if o_state and o_state != "placed":
                 continue
@@ -359,48 +353,37 @@ def check_pair(yf_symbol, mt5_symbol):
                     reason = f"Price ({check_price}) blew past BUY SL ({o_sl})"
 
             if not is_valid and o_id is not None:
-                print(f"🗑️ Canceling INVALID {o_side.upper()} limit #{o_id} on {o_symbol}. Reason: {reason}")
+                print(f"🗑️ Canceling INVALID {o_side.upper()} limit on {o_symbol}. Reason: {reason}")
                 try:
-                    cancel_res = client.orders.cancel(account_id=ACCOUNT_ID, order_id=o_id)
-                    print(f"   ✅ Cancel response: {cancel_res}")
+                    client.orders.cancel(account_id=ACCOUNT_ID, order_id=o_id)
                 except Exception as c_err:
-                    print(f"   ⚠️ Failed to cancel order #{o_id}: {repr(c_err)}")
+                    print(f"   ⚠️ Failed to cancel: {repr(c_err)}")
             else:
                 valid_pending_symbols.append(o_symbol)
 
-        # Risk-free positions do NOT consume a slot toward MAX_OPEN_TRADES
         risky_positions = [pos for pos in positions if not is_position_risk_free(pos)]
-        risk_free_count = len(positions) - len(risky_positions)
-        risky_positions_count = len(risky_positions)
-        valid_pending_count = len(valid_pending_symbols)
-        total_risky_exposure = risky_positions_count + valid_pending_count
-
-        print(
-            f"   [DEBUG Exposure] risky_positions={risky_positions_count}, "
-            f"risk_free_positions={risk_free_count}, valid_pending={valid_pending_count}, "
-            f"risky_total={total_risky_exposure}/{MAX_OPEN_TRADES}"
-        )
+        total_risky_exposure = len(risky_positions) + len(valid_pending_symbols)
 
         if total_risky_exposure >= MAX_OPEN_TRADES:
-            print(f"🛑 MAX RISKY EXPOSURE REACHED ({total_risky_exposure}/{MAX_OPEN_TRADES}). Skipping new entries.")
+            print(f"🛑 MAX RISKY EXPOSURE REACHED ({total_risky_exposure}/{MAX_OPEN_TRADES}). Skipping.")
             return
 
-        # Keep at most ONE active position per pair (and block if a valid pending order exists on this pair)
         if mt5_symbol in valid_pending_symbols:
             print(f"ℹ️ Valid pending order already exists for {mt5_symbol}. Skipping.")
             return
 
+        # STRICT 1 ACTIVE POSITION PER PAIR (Blocks even if risk-free)
         for pos in positions:
             pos_symbol = str(get_attr_safe(pos, ["symbol", "instrument"], ""))
             if pos_symbol == mt5_symbol:
-                print(f"ℹ️ Active position already exists for {mt5_symbol}. Keeping 1 active position per pair.")
+                print(f"ℹ️ Active position already exists for {mt5_symbol}. Skipping.")
                 return
 
     except Exception as e:
         print(f"⚠️ Error checking global risk/orders: {repr(e)}")
         return
 
-    # 3. FETCH M15 DATA & RUN STRATEGIES
+    # 4. FETCH M15 DATA & RUN STRATEGIES
     try:
         df = ticker.history(period="5d", interval="15m")
         if isinstance(df.columns, pd.MultiIndex):
@@ -410,16 +393,15 @@ def check_pair(yf_symbol, mt5_symbol):
         return
 
     if len(df) < 50:
-        print(f"⚠️ Not enough M15 candles ({len(df)} < 50) for {yf_symbol}")
         return
 
-    current_price = float(df["Close"].iloc[-1])
+    current_price = live_price if live_price is not None else float(df["Close"].iloc[-1])
     sl_buffer = get_sl_buffer(mt5_symbol)
 
     major_high = float(df["High"].iloc[-50:].max())
     major_low = float(df["Low"].iloc[-50:].min())
 
-    # STRATEGY 1: SMC FVG
+    # STRATEGY 1: SMC FVG (Limit Order)
     c1_high = float(df["High"].iloc[-3])
     c1_low = float(df["Low"].iloc[-3])
     c3_high = float(df["High"].iloc[-1])
@@ -434,7 +416,7 @@ def check_pair(yf_symbol, mt5_symbol):
         execute_trade(mt5_symbol, "sell", "limit", c1_low, float(df["High"].iloc[-3:].max()) + sl_buffer, major_low)
         return
 
-    # STRATEGY 2: B&R
+    # STRATEGY 2: B&R (Limit Order)
     recent_high = float(df["High"].iloc[-25:-1].max())
     recent_low = float(df["Low"].iloc[-25:-1].min())
     prev_close = float(df["Close"].iloc[-2])
@@ -475,7 +457,7 @@ def check_pair(yf_symbol, mt5_symbol):
     print("No clear setup right now.")
 
 
-# --- HELPER FUNCTION TO PLACE TRADE (TICKERALL) ---
+# --- HELPER FUNCTION TO PLACE TRADE (NO FALLBACK) ---
 def execute_trade(symbol, side, order_type, entry_price, sl, original_major_target):
     current_lot = float(LOT_SIZES.get(symbol, DEFAULT_LOT_SIZE))
     order_side = "BUY" if side.lower() == "buy" else "SELL"
@@ -495,35 +477,22 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
 
     fmt_tp = fmt_price(symbol, raw_tp)
 
-    print(
-        f"🎯 Placing {order_side} {symbol} via {order_type.upper()} | "
-        f"Entry={fmt_entry} | Lots={current_lot} | SL={fmt_sl} | TP={fmt_tp}"
-    )
+    print(f"🎯 Placing {order_side} {symbol} via {order_type.upper()} | Entry={fmt_entry} | Lots={current_lot} | SL={fmt_sl} | TP={fmt_tp}")
 
     try:
         if order_type == "limit":
             res = client.orders.place(
-                account_id=ACCOUNT_ID,
-                symbol=symbol,
-                side=order_side,
-                type="limit",
-                volume=current_lot,
-                price=fmt_entry,
-                stop_loss=fmt_sl,
-                take_profit=fmt_tp,
+                account_id=ACCOUNT_ID, symbol=symbol, side=order_side, type="limit",
+                volume=current_lot, price=fmt_entry, stop_loss=fmt_sl, take_profit=fmt_tp,
             )
             print(f"✅ LIMIT ORDER PLACED! Response: {res}")
         else:
             res = client.orders.place(
-                account_id=ACCOUNT_ID,
-                symbol=symbol,
-                side=order_side,
-                type="market",
-                volume=current_lot,
-                stop_loss=fmt_sl,
-                take_profit=fmt_tp,
+                account_id=ACCOUNT_ID, symbol=symbol, side=order_side, type="market",
+                volume=current_lot, stop_loss=fmt_sl, take_profit=fmt_tp,
             )
             print(f"✅ MARKET ORDER PLACED! Response: {res}")
+            
     except Exception as e:
         print(f"❌ Trade placement error for {symbol} ({order_type}): {repr(e)}")
 
