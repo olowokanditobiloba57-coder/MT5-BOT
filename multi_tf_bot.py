@@ -494,7 +494,7 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
 
     if risk_distance <= 0:
         print(f"❌ Invalid risk_distance (0) for {symbol}. Aborting order.")
-                return
+        return
 
     if order_side == "BUY":
         raw_tp = max(float(original_major_target), fmt_entry + (risk_distance * MIN_RR_RATIO))
