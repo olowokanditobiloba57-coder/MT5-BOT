@@ -494,3 +494,66 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
 
     if risk_distance <= 0:
         print(f"❌ Invalid risk_distance (0) for {symbol}. Aborting order.")
+        return 
+    if order_side == "BUY":
+    raw_tp = max(
+        float(original_major_target),
+        fmt_entry + (risk_distance * MIN_RR_RATIO),
+    )
+else:
+    raw_tp = min(
+        float(original_major_target),
+        fmt_entry - (risk_distance * MIN_RR_RATIO),
+    )
+
+fmt_tp = fmt_price(symbol, raw_tp)
+
+print(
+    f"🎯 Placing {order_side} {symbol} via {order_type.upper()} | "
+    f"Entry={fmt_entry} | Lots={current_lot} | SL={fmt_sl} | TP={fmt_tp}"
+)
+
+try:
+    if order_type == "limit":
+        res = client.orders.place(
+            account_id=ACCOUNT_ID,
+            symbol=symbol,
+            side=order_side,
+            type="limit",
+            volume=current_lot,
+            price=fmt_entry,
+            stop_loss=fmt_sl,
+            take_profit=fmt_tp,
+        )
+        print(f"✅ LIMIT ORDER PLACED! Response: {res}")
+    else:
+        res = client.orders.place(
+            account_id=ACCOUNT_ID,
+            symbol=symbol,
+            side=order_side,
+            type="market",
+            volume=current_lot,
+            stop_loss=fmt_sl,
+            take_profit=fmt_tp,
+        )
+        print(f"✅ MARKET ORDER PLACED! Response: {res}")
+except Exception as e:
+    print(f"❌ Trade placement error for {symbol} ({order_type}): {repr(e)}")
+
+
+# --- MAIN RUN ---
+print("1. Managing open trades (Trailing Stop Engine)...")
+manage_open_trades()
+print("\n2. Checking NairaProp Rules...")
+if not check_prop_firm_rules():
+    print("🔴 Stopping all trading for this cycle.")
+else:
+    if is_news_time():
+        print("📰 Skipping new entries due to news.")
+    else:
+        print("✅ Scanning pairs...")
+        for yf_sym, mt5_sym in PAIRS:
+            check_pair(yf_sym, mt5_sym)
+            time.sleep(10)
+print("\nFinished. Going back to sleep.")
+            
