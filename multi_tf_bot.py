@@ -60,6 +60,18 @@ PAIRS = [
     ("GC=F", "XAUUSDm"),
 ]
 
+ENTRY_FIELD_NAMES = [
+    "entry_price",
+    "entry",
+    "open_price",
+    "price_open",
+    "openPrice",
+    "price",
+    "avg_price",
+    "average_price",
+    "open",
+]
+
 print("Starting Advanced SMC Bot (Risk-Free Slots, 1 Pos/Pair, Trailing & Debug Logs)...")
 
 
@@ -86,7 +98,7 @@ def normalize_side(raw_side):
 
 def is_position_risk_free(pos) -> bool:
     try:
-        entry = float(get_attr_safe(pos, ["open_price", "price_open", "openPrice", "price"], 0.0) or 0.0)
+        entry = float(get_attr_safe(pos, ENTRY_FIELD_NAMES, 0.0) or 0.0)
         sl = float(get_attr_safe(pos, ["stop_loss", "sl", "stopLoss"], 0.0) or 0.0)
         side = normalize_side(get_attr_safe(pos, ["side", "type"]))
 
@@ -187,8 +199,8 @@ def manage_open_trades():
             ticket = get_attr_safe(pos, ["ticket", "id", "position_id", "order_ticket"])
             symbol = str(get_attr_safe(pos, ["symbol", "instrument"], ""))
             side = normalize_side(get_attr_safe(pos, ["side", "type"]))
-            entry = float(get_attr_safe(pos, ["open_price", "price_open", "openPrice", "price"], 0.0) or 0.0)
-            current_price = float(get_attr_safe(pos, ["current_price", "price_current", "priceCurrent", "close_price"], 0.0) or 0.0)
+            entry = float(get_attr_safe(pos, ENTRY_FIELD_NAMES, 0.0) or 0.0)
+            current_price = float(get_attr_safe(pos, ["current_price", "price_current", "priceCurrent", "close_price", "market_price"], 0.0) or 0.0)
             current_sl = float(get_attr_safe(pos, ["stop_loss", "sl", "stopLoss"], 0.0) or 0.0)
             tp = float(get_attr_safe(pos, ["take_profit", "tp", "takeProfit"], 0.0) or 0.0)
             risk_free = is_position_risk_free(pos)
@@ -197,6 +209,9 @@ def manage_open_trades():
                 f"   [DEBUG Pos] symbol={symbol} ticket={ticket} side={side} "
                 f"entry={entry} curr={current_price} sl={current_sl} tp={tp} risk_free={risk_free}"
             )
+
+            if entry <= 0.0:
+                print(f"   [DEBUG RawPos] {repr(pos)}")
 
             if not ticket or not symbol or side not in ("buy", "sell"):
                 print(f"   ⚠️ Skipping position due to missing ticket/symbol/side: ticket={ticket}, symbol={symbol}, side={side}")
@@ -287,29 +302,7 @@ def manage_open_trades():
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ({yf_symbol}) ---")
 
-    # 1. GET LIVE BROKER QUOTE
-    live_bid = None
-    live_ask = None
-    live_price = None
-    try:
-        quote = client.quotes.get(ACCOUNT_ID, mt5_symbol)
-        if quote:
-            q = quote[0] if isinstance(quote, list) else quote
-            raw_bid = get_attr_safe(q, ["bid"])
-            raw_ask = get_attr_safe(q, ["ask"])
-            if raw_bid is not None:
-                live_bid = float(raw_bid)
-            if raw_ask is not None:
-                live_ask = float(raw_ask)
-            if live_ask is not None:
-                live_price = live_ask
-            elif live_bid is not None:
-                live_price = live_bid
-        print(f"   [DEBUG Quote] {mt5_symbol}: bid={live_bid}, ask={live_ask}, ref={live_price}")
-    except Exception as e:
-        print(f"   ⚠️ Quote fetch error for {mt5_symbol}: {repr(e)}")
-
-    # 2. FETCH H1 DATA FOR TREND
+    # 1. FETCH H1 DATA FOR TREND
     try:
         ticker = yf.Ticker(yf_symbol)
         df_h1 = ticker.history(period="2d", interval="1h")
@@ -327,9 +320,9 @@ def check_pair(yf_symbol, mt5_symbol):
         print(f"⚠️ H1 Data Error: {repr(e)}")
         return
 
-    check_price = live_price if live_price is not None else 0.0
+    check_price = h1_close
 
-    # 3. GLOBAL VALIDATION: RISK-FREE SLOT EXCLUSION + 1 ACTIVE POSITION PER PAIR
+    # 2. GLOBAL VALIDATION: RISK-FREE SLOT EXCLUSION + 1 ACTIVE POSITION PER PAIR
     try:
         all_pending_orders = client.orders.list_pending(ACCOUNT_ID) or []
         acc_detail = client.accounts.get(ACCOUNT_ID)
@@ -407,7 +400,7 @@ def check_pair(yf_symbol, mt5_symbol):
         print(f"⚠️ Error checking global risk/orders: {repr(e)}")
         return
 
-    # 4. FETCH M15 DATA & RUN STRATEGIES
+    # 3. FETCH M15 DATA & RUN STRATEGIES
     try:
         df = ticker.history(period="5d", interval="15m")
         if isinstance(df.columns, pd.MultiIndex):
@@ -420,8 +413,7 @@ def check_pair(yf_symbol, mt5_symbol):
         print(f"⚠️ Not enough M15 candles ({len(df)} < 50) for {yf_symbol}")
         return
 
-    yf_last_close = float(df["Close"].iloc[-1])
-    current_price = live_price if live_price is not None else yf_last_close
+    current_price = float(df["Close"].iloc[-1])
     sl_buffer = get_sl_buffer(mt5_symbol)
 
     major_high = float(df["High"].iloc[-50:].max())
