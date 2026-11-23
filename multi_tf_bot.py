@@ -70,7 +70,7 @@ ENTRY_FIELD_NAMES = [
     "entry_price", "entry", "open_price", "price_open", "openPrice", "price", "avg_price", "average_price", "open"
 ]
 
-print("Starting Advanced SMC Bot (Live Prices, Strict Pair Limit, Trailing Stop)...")
+print("Starting Advanced SMC Bot (Live Prices, Strict Pair Limit, Trailing Stop, Ghost Cleanup)...")
 
 
 # --- HELPER FUNCTIONS ---
@@ -186,7 +186,7 @@ def check_prop_firm_rules():
         return True
 
 
-# --- TRADE MANAGEMENT (TRAILING STOP ENGINE) ---
+# --- TRADE MANAGEMENT (TRAILING STOP & GHOST CLEANUP) ---
 def manage_open_trades():
     try:
         acc_detail = client.accounts.get(ACCOUNT_ID)
@@ -209,9 +209,32 @@ def manage_open_trades():
             )
 
             if not ticket or not symbol or side not in ("buy", "sell"):
-                print(f"   ⚠️ Skipping position due to missing ticket/symbol/side.")
                 continue
 
+            # 🚨 GHOST TRADE DETECTOR 🚨
+            # If the current price has blown past the stop loss, the broker should have closed it.
+            # We force close it to clear the TickerAll API cache.
+            if current_sl > 0 and current_price > 0:
+                buffer = get_sl_buffer(symbol)
+                if side == "buy" and current_price < (current_sl - buffer):
+                    print(f"👻 GHOST TRADE DETECTED on {symbol} (#{ticket}). Price ({current_price}) is below SL ({current_sl}). Force closing...")
+                    try:
+                        client.positions.close(ACCOUNT_ID, ticket=ticket)
+                        print(f"   ✅ Ghost trade closed successfully.")
+                    except Exception as e:
+                        print(f"   ❌ Failed to close ghost trade: {repr(e)}")
+                    continue  # Skip trailing logic for this trade
+                    
+                elif side == "sell" and current_price > (current_sl + buffer):
+                    print(f"👻 GHOST TRADE DETECTED on {symbol} (#{ticket}). Price ({current_price}) is above SL ({current_sl}). Force closing...")
+                    try:
+                        client.positions.close(ACCOUNT_ID, ticket=ticket)
+                        print(f"   ✅ Ghost trade closed successfully.")
+                    except Exception as e:
+                        print(f"   ❌ Failed to close ghost trade: {repr(e)}")
+                    continue  # Skip trailing logic for this trade
+
+            # --- Normal Trailing Stop Logic Below ---
             if entry <= 0.0 or current_price <= 0.0:
                 continue
 
@@ -284,11 +307,8 @@ def manage_open_trades():
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ({yf_symbol}) ---")
 
-    # 1. FETCH LIVE PRICE (FIXED: TickerAll SDK does not have a quotes namespace)
+    # 1. FETCH LIVE PRICE (Fallback to yfinance since TickerAll SDK lacks a simple quotes endpoint)
     live_price = None
-    # The TickerAll SDK does not expose a simple `client.quotes.get()` method.
-    # It is designed for real-time streaming via `client.stream`.
-    # For a simple one-off price check, we fall back to yfinance.
     print(f"   📡 Live price fetch not available via SDK, using yfinance.")
 
     # 2. FETCH H1 DATA FOR TREND
@@ -347,7 +367,6 @@ def check_pair(yf_symbol, mt5_symbol):
             if not is_valid and o_id is not None:
                 print(f"🗑️ Canceling INVALID {o_side.upper()} limit on {o_symbol}. Reason: {reason}")
                 try:
-                    # FIXED: Correct method is cancel_pending, not cancel
                     client.orders.cancel_pending(ACCOUNT_ID, o_id)
                 except Exception as c_err:
                     print(f"   ⚠️ Failed to cancel: {repr(c_err)}")
@@ -449,7 +468,6 @@ def check_pair(yf_symbol, mt5_symbol):
 
     print("No clear setup right now.")
 
-
 # --- HELPER FUNCTION TO PLACE TRADE (NO FALLBACK) ---
 def execute_trade(symbol, side, order_type, entry_price, sl, original_major_target):
     current_lot = float(LOT_SIZES.get(symbol, DEFAULT_LOT_SIZE))
@@ -489,9 +507,8 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
     except Exception as e:
         print(f"❌ Trade placement error for {symbol} ({order_type}): {repr(e)}")
 
-
 # --- MAIN RUN ---
-print("1. Managing open trades (Trailing Stop Engine)...")
+print("1. Managing open trades (Trailing Stop Engine & Ghost Cleanup)...")
 manage_open_trades()
 print("\n2. Checking NairaProp Rules...")
 if not check_prop_firm_rules():
