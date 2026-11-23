@@ -19,7 +19,6 @@ if not all([API_KEY, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER]):
 
 # --- WEEKEND FILTER ---
 now = datetime.now(timezone.utc)
-# Forex market closes Friday 21:00 UTC and opens Sunday 21:00 UTC
 if (now.weekday() == 5) or (now.weekday() == 6 and now.hour < 21) or (now.weekday() == 4 and now.hour >= 21):
     print("🛑 WEEKEND DETECTED: Forex market is closed. Going back to sleep to protect account from gap risk.")
     exit(0)
@@ -285,19 +284,12 @@ def manage_open_trades():
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ({yf_symbol}) ---")
 
-    # 1. FETCH LIVE PRICE FROM TICKERALL
+    # 1. FETCH LIVE PRICE (FIXED: TickerAll SDK does not have a quotes namespace)
     live_price = None
-    try:
-        quote = client.quotes.get(ACCOUNT_ID, mt5_symbol)
-        if quote:
-            q = quote[0] if isinstance(quote, list) else quote
-            ask = q.get('ask') if isinstance(q, dict) else getattr(q, 'ask', None)
-            bid = q.get('bid') if isinstance(q, dict) else getattr(q, 'bid', None)
-            if ask: live_price = float(ask)
-            elif bid: live_price = float(bid)
-            print(f"   📡 Live broker price for {mt5_symbol}: {live_price}")
-    except Exception as e:
-        print(f"   ⚠️ Live price fetch failed: {repr(e)}. Using yfinance.")
+    # The TickerAll SDK does not expose a simple `client.quotes.get()` method.
+    # It is designed for real-time streaming via `client.stream`.
+    # For a simple one-off price check, we fall back to yfinance.
+    print(f"   📡 Live price fetch not available via SDK, using yfinance.")
 
     # 2. FETCH H1 DATA FOR TREND
     try:
@@ -355,7 +347,8 @@ def check_pair(yf_symbol, mt5_symbol):
             if not is_valid and o_id is not None:
                 print(f"🗑️ Canceling INVALID {o_side.upper()} limit on {o_symbol}. Reason: {reason}")
                 try:
-                    client.orders.cancel(account_id=ACCOUNT_ID, order_id=o_id)
+                    # FIXED: Correct method is cancel_pending, not cancel
+                    client.orders.cancel_pending(ACCOUNT_ID, o_id)
                 except Exception as c_err:
                     print(f"   ⚠️ Failed to cancel: {repr(c_err)}")
             else:
