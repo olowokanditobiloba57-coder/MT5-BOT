@@ -70,7 +70,7 @@ ENTRY_FIELD_NAMES = [
     "entry_price", "entry", "open_price", "price_open", "openPrice", "price", "avg_price", "average_price", "open"
 ]
 
-print("Starting Advanced SMC Bot (Fixed Validation, Ghost Cleanup)...")
+print("Starting Advanced SMC Bot (TP Validation, Ghost Cleanup, Strict Pair Limit)...")
 
 
 # --- HELPER FUNCTIONS ---
@@ -305,11 +305,9 @@ def manage_open_trades():
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ({yf_symbol}) ---")
 
-    # 1. FETCH LIVE PRICE (Fallback to yfinance)
     live_price = None
     print(f"   📡 Live price fetch not available via SDK, using yfinance.")
 
-    # 2. FETCH H1 DATA FOR TREND
     try:
         ticker = yf.Ticker(yf_symbol)
         df_h1 = ticker.history(period="2d", interval="1h")
@@ -328,7 +326,7 @@ def check_pair(yf_symbol, mt5_symbol):
 
     check_price = live_price if live_price is not None else h1_close
 
-    # 3. GLOBAL VALIDATION (FIXED: Only validate orders for the current pair)
+    # 3. GLOBAL VALIDATION (With TP Rule Added)
     try:
         all_pending_orders = client.orders.list_pending(ACCOUNT_ID) or []
         acc_detail = client.accounts.get(ACCOUNT_ID)
@@ -341,12 +339,12 @@ def check_pair(yf_symbol, mt5_symbol):
             o_id = get_attr_safe(order, ["order_ticket", "ticket", "id"])
             o_side = normalize_side(get_attr_safe(order, ["side", "type"]))
             o_sl = float(get_attr_safe(order, ["stop_loss", "sl", "stopLoss"], 0.0) or 0.0)
+            o_tp = float(get_attr_safe(order, ["take_profit", "tp", "takeProfit"], 0.0) or 0.0) # Get TP
 
             if o_state and o_state != "placed":
                 continue
 
             if o_symbol == mt5_symbol:
-                # Validate ONLY the current pair's orders
                 is_valid = True
                 reason = ""
 
@@ -364,6 +362,15 @@ def check_pair(yf_symbol, mt5_symbol):
                         is_valid = False
                         reason = f"Price ({check_price}) blew past BUY SL ({o_sl})"
 
+                # NEW RULE: Take Profit Reached
+                if is_valid and check_price > 0 and o_tp > 0:
+                    if o_side == "sell" and check_price <= o_tp:
+                        is_valid = False
+                        reason = f"Price ({check_price}) already reached SELL TP ({o_tp})"
+                    elif o_side == "buy" and check_price >= o_tp:
+                        is_valid = False
+                        reason = f"Price ({check_price}) already reached BUY TP ({o_tp})"
+
                 if not is_valid and o_id is not None:
                     print(f"🗑️ Canceling INVALID {o_side.upper()} limit on {o_symbol}. Reason: {reason}")
                     try:
@@ -373,7 +380,6 @@ def check_pair(yf_symbol, mt5_symbol):
                 else:
                     valid_pending_symbols.append(o_symbol)
             else:
-                # If the order belongs to a DIFFERENT pair, just count it as risk (do not validate it here)
                 valid_pending_symbols.append(o_symbol)
 
         risky_positions = [pos for pos in positions if not is_position_risk_free(pos)]
