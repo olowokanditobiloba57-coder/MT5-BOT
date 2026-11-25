@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 # --- CONFIGURATION & AUTO-CONNECT ---
 MIN_RR_RATIO = 3.0
+TRADES_PLACED_THIS_RUN = 0  # 🧠 Local memory to track trades placed in this cycle
 
 API_KEY = os.getenv("TICKERALL_API_KEY")
 MT5_LOGIN = os.getenv("MT5_LOGIN")
@@ -315,7 +316,6 @@ def cleanup_invalid_orders():
 
             if o_state and o_state != "placed": continue
 
-            # Find the yahoo symbol
             yf_symbol = next((yf for yf, mt5 in PAIRS if mt5 == o_symbol), None)
             if not yf_symbol: continue
 
@@ -361,6 +361,8 @@ def cleanup_invalid_orders():
 
 # --- STRATEGY & EXECUTION ---
 def check_pair(yf_symbol, mt5_symbol):
+    global TRADES_PLACED_THIS_RUN  # Access the global memory counter
+    
     print(f"\n--- Checking {mt5_symbol} ({yf_symbol}) ---")
 
     live_price = None
@@ -384,7 +386,7 @@ def check_pair(yf_symbol, mt5_symbol):
 
     check_price = live_price if live_price is not None else h1_close
 
-    # 3. GLOBAL VALIDATION (Orders are already cleaned up by cleanup_invalid_orders)
+    # 3. GLOBAL VALIDATION (Includes local memory)
     try:
         all_pending_orders = client.orders.list_pending(ACCOUNT_ID) or []
         acc_detail = client.accounts.get(ACCOUNT_ID)
@@ -393,7 +395,9 @@ def check_pair(yf_symbol, mt5_symbol):
         valid_pending_symbols = [str(get_attr_safe(o, ["symbol", "instrument"], "")) for o in all_pending_orders if str(get_attr_safe(o, ["state", "status"], "")).lower() == "placed"]
         
         risky_positions = [pos for pos in positions if not is_position_risk_free(pos)]
-        total_risky_exposure = len(risky_positions) + len(valid_pending_symbols)
+        
+        # 🧠 MEMORY FIX: Add the local counter to the API count
+        total_risky_exposure = len(risky_positions) + len(valid_pending_symbols) + TRADES_PLACED_THIS_RUN
 
         if total_risky_exposure >= MAX_OPEN_TRADES:
             print(f"🛑 MAX RISKY EXPOSURE REACHED ({total_risky_exposure}/{MAX_OPEN_TRADES}). Skipping.")
@@ -431,7 +435,7 @@ def check_pair(yf_symbol, mt5_symbol):
     major_high = float(df["High"].iloc[-50:].max())
     major_low = float(df["Low"].iloc[-50:].min())
 
-    # STRATEGY 1: SMC FVG (Limit Order)
+    # STRATEGY 1: SMC FVG
     c1_high = float(df["High"].iloc[-3])
     c1_low = float(df["Low"].iloc[-3])
     c3_high = float(df["High"].iloc[-1])
@@ -446,7 +450,7 @@ def check_pair(yf_symbol, mt5_symbol):
         execute_trade(mt5_symbol, "sell", "limit", c1_low, float(df["High"].iloc[-3:].max()) + sl_buffer, major_low)
         return
 
-    # STRATEGY 2: B&R (Limit Order)
+    # STRATEGY 2: B&R
     recent_high = float(df["High"].iloc[-25:-1].max())
     recent_low = float(df["Low"].iloc[-25:-1].min())
     prev_close = float(df["Close"].iloc[-2])
@@ -464,7 +468,7 @@ def check_pair(yf_symbol, mt5_symbol):
         execute_trade(mt5_symbol, "sell", "limit", recent_low, curr_high + sl_buffer, major_low)
         return
 
-    # STRATEGY 3: APA (Market Order)
+    # STRATEGY 3: APA
     body_size = abs(curr_close - curr_open)
     lower_wick = min(curr_open, curr_close) - curr_low
     upper_wick = curr_high - max(curr_open, curr_close)
@@ -489,6 +493,8 @@ def check_pair(yf_symbol, mt5_symbol):
 
 # --- HELPER FUNCTION TO PLACE TRADE (NO FALLBACK) ---
 def execute_trade(symbol, side, order_type, entry_price, sl, original_major_target):
+    global TRADES_PLACED_THIS_RUN  # Access the global memory counter
+
     current_lot = float(LOT_SIZES.get(symbol, DEFAULT_LOT_SIZE))
     order_side = "BUY" if side.lower() == "buy" else "SELL"
 
@@ -523,11 +529,17 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
             )
             print(f"✅ MARKET ORDER PLACED! Response: {res}")
             
+        # 🧠 Increment the local memory counter on success
+        TRADES_PLACED_THIS_RUN += 1
+        
     except Exception as e:
         print(f"❌ Trade placement error for {symbol} ({order_type}): {repr(e)}")
 
 
 # --- MAIN RUN ---
+# Reset the local memory counter for this run
+TRADES_PLACED_THIS_RUN = 0
+
 print("1. Managing open trades (Trailing Stop Engine & Ghost Cleanup)...")
 manage_open_trades()
 
