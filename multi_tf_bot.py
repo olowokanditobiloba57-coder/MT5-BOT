@@ -70,7 +70,7 @@ ENTRY_FIELD_NAMES = [
     "entry_price", "entry", "open_price", "price_open", "openPrice", "price", "avg_price", "average_price", "open"
 ]
 
-print("Starting Advanced SMC Bot (TP Validation, Ghost Cleanup, Strict Pair Limit)...")
+print("Starting Advanced SMC Bot (Global Cleanup, Ghost Cleanup, Trailing Stop)...")
 
 
 # --- HELPER FUNCTIONS ---
@@ -203,10 +203,7 @@ def manage_open_trades():
             tp = float(get_attr_safe(pos, ["take_profit", "tp", "takeProfit"], 0.0) or 0.0)
             risk_free = is_position_risk_free(pos)
 
-            print(
-                f"   [DEBUG Pos] symbol={symbol} ticket={ticket} side={side} "
-                f"entry={entry} curr={current_price} sl={current_sl} tp={tp} risk_free={risk_free}"
-            )
+            print(f"   [DEBUG Pos] symbol={symbol} ticket={ticket} side={side} entry={entry} curr={current_price} sl={current_sl} tp={tp} risk_free={risk_free}")
 
             if not ticket or not symbol or side not in ("buy", "sell"):
                 continue
@@ -301,6 +298,67 @@ def manage_open_trades():
         print(f"❌ Trade management error: {repr(e)}")
 
 
+# --- GLOBAL CLEANUP: Cancel all invalid orders across ALL pairs at once ---
+def cleanup_invalid_orders():
+    try:
+        all_pending_orders = client.orders.list_pending(ACCOUNT_ID) or []
+        if not all_pending_orders: return
+
+        ticker_cache = {}
+        for order in all_pending_orders:
+            o_symbol = str(get_attr_safe(order, ["symbol", "instrument"], ""))
+            o_state = str(get_attr_safe(order, ["state", "status"], "")).lower()
+            o_id = get_attr_safe(order, ["order_ticket", "ticket", "id"])
+            o_side = normalize_side(get_attr_safe(order, ["side", "type"]))
+            o_sl = float(get_attr_safe(order, ["stop_loss", "sl", "stopLoss"], 0.0) or 0.0)
+            o_tp = float(get_attr_safe(order, ["take_profit", "tp", "takeProfit"], 0.0) or 0.0)
+
+            if o_state and o_state != "placed": continue
+
+            # Find the yahoo symbol
+            yf_symbol = next((yf for yf, mt5 in PAIRS if mt5 == o_symbol), None)
+            if not yf_symbol: continue
+
+            if o_symbol not in ticker_cache:
+                ticker = yf.Ticker(yf_symbol)
+                df_h1 = ticker.history(period="2d", interval="1h")
+                if isinstance(df_h1.columns, pd.MultiIndex):
+                    df_h1.columns = df_h1.columns.get_level_values(0)
+                if df_h1.empty: continue
+                df_h1["EMA_50"] = df_h1["Close"].ewm(span=50, adjust=False).mean()
+                h1_close = float(df_h1["Close"].iloc[-1])
+                h1_ema = float(df_h1["EMA_50"].iloc[-1])
+                ticker_cache[o_symbol] = (h1_close, h1_close > h1_ema)
+
+            check_price, h1_bullish = ticker_cache[o_symbol]
+            is_valid = True
+            reason = ""
+
+            if o_side == "sell" and h1_bullish:
+                is_valid = False; reason = "H1 trend flipped Bullish"
+            elif o_side == "buy" and not h1_bullish:
+                is_valid = False; reason = "H1 trend flipped Bearish"
+            elif check_price > 0 and o_sl > 0:
+                if o_side == "sell" and check_price > o_sl:
+                    is_valid = False; reason = f"Price blew past SELL SL"
+                elif o_side == "buy" and check_price < o_sl:
+                    is_valid = False; reason = f"Price blew past BUY SL"
+            if is_valid and check_price > 0 and o_tp > 0:
+                if o_side == "sell" and check_price <= o_tp:
+                    is_valid = False; reason = f"Price reached SELL TP"
+                elif o_side == "buy" and check_price >= o_tp:
+                    is_valid = False; reason = f"Price reached BUY TP"
+
+            if not is_valid and o_id is not None:
+                print(f"🗑️ Canceling INVALID {o_side.upper()} limit on {o_symbol}. Reason: {reason}")
+                try:
+                    client.orders.cancel_pending(ACCOUNT_ID, o_id)
+                except Exception as c_err:
+                    print(f"   ⚠️ Failed to cancel: {repr(c_err)}")
+    except Exception as e:
+        print(f"⚠️ Error during global cleanup: {repr(e)}")
+
+
 # --- STRATEGY & EXECUTION ---
 def check_pair(yf_symbol, mt5_symbol):
     print(f"\n--- Checking {mt5_symbol} ({yf_symbol}) ---")
@@ -326,62 +384,14 @@ def check_pair(yf_symbol, mt5_symbol):
 
     check_price = live_price if live_price is not None else h1_close
 
-    # 3. GLOBAL VALIDATION (With TP Rule Added)
+    # 3. GLOBAL VALIDATION (Orders are already cleaned up by cleanup_invalid_orders)
     try:
         all_pending_orders = client.orders.list_pending(ACCOUNT_ID) or []
         acc_detail = client.accounts.get(ACCOUNT_ID)
         positions = get_attr_safe(acc_detail, ["positions"], []) or []
 
-        valid_pending_symbols = []
-        for order in all_pending_orders:
-            o_symbol = str(get_attr_safe(order, ["symbol", "instrument"], ""))
-            o_state = str(get_attr_safe(order, ["state", "status"], "")).lower()
-            o_id = get_attr_safe(order, ["order_ticket", "ticket", "id"])
-            o_side = normalize_side(get_attr_safe(order, ["side", "type"]))
-            o_sl = float(get_attr_safe(order, ["stop_loss", "sl", "stopLoss"], 0.0) or 0.0)
-            o_tp = float(get_attr_safe(order, ["take_profit", "tp", "takeProfit"], 0.0) or 0.0) # Get TP
-
-            if o_state and o_state != "placed":
-                continue
-
-            if o_symbol == mt5_symbol:
-                is_valid = True
-                reason = ""
-
-                if o_side == "sell" and h1_bullish:
-                    is_valid = False
-                    reason = "H1 trend flipped Bullish"
-                elif o_side == "buy" and not h1_bullish:
-                    is_valid = False
-                    reason = "H1 trend flipped Bearish"
-                elif check_price > 0 and o_sl > 0:
-                    if o_side == "sell" and check_price > o_sl:
-                        is_valid = False
-                        reason = f"Price ({check_price}) blew past SELL SL ({o_sl})"
-                    elif o_side == "buy" and check_price < o_sl:
-                        is_valid = False
-                        reason = f"Price ({check_price}) blew past BUY SL ({o_sl})"
-
-                # NEW RULE: Take Profit Reached
-                if is_valid and check_price > 0 and o_tp > 0:
-                    if o_side == "sell" and check_price <= o_tp:
-                        is_valid = False
-                        reason = f"Price ({check_price}) already reached SELL TP ({o_tp})"
-                    elif o_side == "buy" and check_price >= o_tp:
-                        is_valid = False
-                        reason = f"Price ({check_price}) already reached BUY TP ({o_tp})"
-
-                if not is_valid and o_id is not None:
-                    print(f"🗑️ Canceling INVALID {o_side.upper()} limit on {o_symbol}. Reason: {reason}")
-                    try:
-                        client.orders.cancel_pending(ACCOUNT_ID, o_id)
-                    except Exception as c_err:
-                        print(f"   ⚠️ Failed to cancel: {repr(c_err)}")
-                else:
-                    valid_pending_symbols.append(o_symbol)
-            else:
-                valid_pending_symbols.append(o_symbol)
-
+        valid_pending_symbols = [str(get_attr_safe(o, ["symbol", "instrument"], "")) for o in all_pending_orders if str(get_attr_safe(o, ["state", "status"], "")).lower() == "placed"]
+        
         risky_positions = [pos for pos in positions if not is_position_risk_free(pos)]
         total_risky_exposure = len(risky_positions) + len(valid_pending_symbols)
 
@@ -520,7 +530,11 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
 # --- MAIN RUN ---
 print("1. Managing open trades (Trailing Stop Engine & Ghost Cleanup)...")
 manage_open_trades()
-print("\n2. Checking NairaProp Rules...")
+
+print("\n2. Cleaning up invalid pending orders...")
+cleanup_invalid_orders()
+
+print("\n3. Checking NairaProp Rules...")
 if not check_prop_firm_rules():
     print("🛑 Stopping all trading for this cycle.")
 else:
