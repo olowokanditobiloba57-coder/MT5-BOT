@@ -511,12 +511,9 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
     risk_distance = abs(fmt_entry - fmt_sl)
 
     # 🛑 SAFETY CHECK 1: Minimum SL distance
-    if "JPY" in symbol:
-        min_sl = MIN_SL_PIPS_JPY * 0.01
-    elif "XAU" in symbol:
-        min_sl = MIN_SL_PIPS_GOLD * 0.01
-    else:
-        min_sl = MIN_SL_PIPS_STANDARD * 0.0001
+    if "JPY" in symbol: min_sl = MIN_SL_PIPS_JPY * 0.01
+    elif "XAU" in symbol: min_sl = MIN_SL_PIPS_GOLD * 0.01
+    else: min_sl = MIN_SL_PIPS_STANDARD * 0.0001
 
     if risk_distance < min_sl:
         print(f"❌ ABORTING TRADE: SL too tight for {symbol}. Risk ({risk_distance:.5f}) < min ({min_sl:.5f}).")
@@ -526,13 +523,16 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
         print(f"❌ Invalid risk_distance (0) for {symbol}. Aborting order.")
         return
 
-    # 🛑 SAFETY CHECK 2: Validate Limit Order placement
+    # 🛑 SAFETY CHECK 2: Validate Limit Order placement (Increased Buffer for delayed yfinance data)
     if order_type == "limit":
-        if order_side == "BUY" and fmt_entry >= current_price:
-            print(f"❌ ABORTING LIMIT: BUY entry ({fmt_entry}) is ABOVE current price ({current_price}). Broker would reject.")
+        # Use a 5-pip buffer to account for yfinance delay
+        buffer = 0.05 if "XAU" in symbol else (0.05 if "JPY" in symbol else 0.0005)
+        
+        if order_side == "BUY" and fmt_entry >= (current_price - buffer):
+            print(f"❌ ABORTING LIMIT: BUY entry ({fmt_entry}) is too close to or above current price ({current_price}). Broker would reject.")
             return
-        elif order_side == "SELL" and fmt_entry <= current_price:
-            print(f"❌ ABORTING LIMIT: SELL entry ({fmt_entry}) is BELOW current price ({current_price}). Broker would reject.")
+        elif order_side == "SELL" and fmt_entry <= (current_price + buffer):
+            print(f"❌ ABORTING LIMIT: SELL entry ({fmt_entry}) is too close to or below current price ({current_price}). Broker would reject.")
             return
 
     if order_side == "BUY":
@@ -585,3 +585,4 @@ else:
             check_pair(yf_sym, mt5_sym)
             time.sleep(10)
 print("\nFinished. Going back to sleep.")
+    
