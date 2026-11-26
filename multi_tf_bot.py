@@ -494,7 +494,7 @@ def check_pair(yf_symbol, mt5_symbol):
     elif (bear_pin or bear_engulf) and not h1_bullish:
         print("🔴 APA Bearish -> Market Order")
         execute_trade(mt5_symbol, "sell", "market", current_price, curr_high + sl_buffer, major_low, current_price)
-        return 
+        return
 
     print("No clear setup right now.")
 
