@@ -361,7 +361,7 @@ def cleanup_invalid_orders():
 
 # --- STRATEGY & EXECUTION ---
 def check_pair(yf_symbol, mt5_symbol):
-    global TRADES_PLACED_THIS_RUN  # Access the global memory counter
+    global TRADES_PLACED_THIS_RUN
     
     print(f"\n--- Checking {mt5_symbol} ({yf_symbol}) ---")
 
@@ -396,7 +396,7 @@ def check_pair(yf_symbol, mt5_symbol):
         
         risky_positions = [pos for pos in positions if not is_position_risk_free(pos)]
         
-        # 🧠 MEMORY FIX: Add the local counter to the API count
+        # 🧠 MEMORY FIX
         total_risky_exposure = len(risky_positions) + len(valid_pending_symbols) + TRADES_PLACED_THIS_RUN
 
         if total_risky_exposure >= MAX_OPEN_TRADES:
@@ -491,9 +491,9 @@ def check_pair(yf_symbol, mt5_symbol):
     print("No clear setup right now.")
 
 
-# --- HELPER FUNCTION TO PLACE TRADE (NO FALLBACK) ---
+# --- HELPER FUNCTION TO PLACE TRADE (MIN SL DISTANCE) ---
 def execute_trade(symbol, side, order_type, entry_price, sl, original_major_target):
-    global TRADES_PLACED_THIS_RUN  # Access the global memory counter
+    global TRADES_PLACED_THIS_RUN
 
     current_lot = float(LOT_SIZES.get(symbol, DEFAULT_LOT_SIZE))
     order_side = "BUY" if side.lower() == "buy" else "SELL"
@@ -501,6 +501,15 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
     fmt_entry = fmt_price(symbol, entry_price)
     fmt_sl = fmt_price(symbol, sl)
     risk_distance = abs(fmt_entry - fmt_sl)
+
+    # 🛑 SAFETY CHECK: Minimum SL distance
+    min_sl_distance = 0.00010
+    if "JPY" in symbol: min_sl_distance = 0.010
+    elif "XAU" in symbol: min_sl_distance = 0.10
+
+    if risk_distance < min_sl_distance:
+        print(f"❌ SL too close to entry for {symbol}. Risk distance ({risk_distance:.5f}) < min ({min_sl_distance:.5f}). Aborting order.")
+        return
 
     if risk_distance <= 0:
         print(f"❌ Invalid risk_distance (0) for {symbol}. Aborting order.")
@@ -529,7 +538,6 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
             )
             print(f"✅ MARKET ORDER PLACED! Response: {res}")
             
-        # 🧠 Increment the local memory counter on success
         TRADES_PLACED_THIS_RUN += 1
         
     except Exception as e:
@@ -537,7 +545,6 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
 
 
 # --- MAIN RUN ---
-# Reset the local memory counter for this run
 TRADES_PLACED_THIS_RUN = 0
 
 print("1. Managing open trades (Trailing Stop Engine & Ghost Cleanup)...")
