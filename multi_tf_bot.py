@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 # --- CONFIGURATION & AUTO-CONNECT ---
 MIN_RR_RATIO = 3.0
-TRADES_PLACED_THIS_RUN = 0  # 🧠 Local memory to track trades placed in this cycle
+TRADES_PLACED_THIS_RUN = 0  
 
 API_KEY = os.getenv("TICKERALL_API_KEY")
 MT5_LOGIN = os.getenv("MT5_LOGIN")
@@ -42,6 +42,10 @@ except Exception as e:
 
 # --- SAFETY LIMITS ---
 MAX_OPEN_TRADES = 2
+# 🛑 NEW: Minimum SL distances in pips
+MIN_SL_PIPS_STANDARD = 15.0  # 15 pips for EURUSD, GBPUSD
+MIN_SL_PIPS_JPY = 20.0       # 20 pips for GBPJPY, AUDJPY
+MIN_SL_PIPS_GOLD = 200.0     # $2.00 for XAUUSD (200 points)
 
 # --- FIXED LOT SIZES (Exness 'm' suffix) ---
 LOT_SIZES = {
@@ -71,7 +75,7 @@ ENTRY_FIELD_NAMES = [
     "entry_price", "entry", "open_price", "price_open", "openPrice", "price", "avg_price", "average_price", "open"
 ]
 
-print("Starting Advanced SMC Bot (Global Cleanup, Ghost Cleanup, Trailing Stop)...")
+print("Starting Advanced SMC Bot (Minimum SL Filter Enabled)...")
 
 
 # --- HELPER FUNCTIONS ---
@@ -502,13 +506,16 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
     fmt_sl = fmt_price(symbol, sl)
     risk_distance = abs(fmt_entry - fmt_sl)
 
-    # 🛑 SAFETY CHECK: Minimum SL distance
-    min_sl_distance = 0.00010
-    if "JPY" in symbol: min_sl_distance = 0.010
-    elif "XAU" in symbol: min_sl_distance = 0.10
+    # 🛑 SAFETY CHECK: Minimum SL distance in price
+    if "JPY" in symbol:
+        min_sl = MIN_SL_PIPS_JPY * 0.01
+    elif "XAU" in symbol:
+        min_sl = MIN_SL_PIPS_GOLD * 0.01
+    else:
+        min_sl = MIN_SL_PIPS_STANDARD * 0.0001
 
-    if risk_distance < min_sl_distance:
-        print(f"❌ SL too close to entry for {symbol}. Risk distance ({risk_distance:.5f}) < min ({min_sl_distance:.5f}). Aborting order.")
+    if risk_distance < min_sl:
+        print(f"❌ ABORTING TRADE: SL too tight for {symbol}. Calculated risk ({risk_distance:.5f}) is less than minimum ({min_sl:.5f}).")
         return
 
     if risk_distance <= 0:
@@ -564,4 +571,4 @@ else:
         for yf_sym, mt5_sym in PAIRS:
             check_pair(yf_sym, mt5_sym)
             time.sleep(10)
-print("\nFinished. Going back to sleep.")
+print("\nFinished. Going back to sleep.") 
