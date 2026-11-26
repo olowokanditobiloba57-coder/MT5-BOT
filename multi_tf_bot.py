@@ -25,10 +25,11 @@ if (now.weekday() == 5) or (now.weekday() == 6 and now.hour < 21) or (now.weekda
     exit(0)
 
 client = Tickerall(api_key=API_KEY)
-print("Connecting to NairaProp account via TickerAll...")
+print("Connecting to NairaProp account via TickerAll (Keep-Alive Mode)...")
 
+# 🚀 FIX 1: Use keep_alive instead of start
 try:
-    session = client.sessions.start(
+    session = client.sessions.keep_alive(
         broker="mt5",
         server=MT5_SERVER,
         account=int(MT5_LOGIN),
@@ -42,10 +43,11 @@ except Exception as e:
 
 # --- SAFETY LIMITS ---
 MAX_OPEN_TRADES = 2
-# 🛑 NEW: Minimum SL distances in pips
-MIN_SL_PIPS_STANDARD = 15.0  # 15 pips for EURUSD, GBPUSD
-MIN_SL_PIPS_JPY = 20.0       # 20 pips for GBPJPY, AUDJPY
-MIN_SL_PIPS_GOLD = 200.0     # $2.00 for XAUUSD (200 points)
+
+# 🛑 Minimum SL distances separated by pair type
+MIN_SL_PIPS_STANDARD = 15.0  
+MIN_SL_PIPS_JPY = 20.0       
+MIN_SL_PIPS_GOLD = 200.0     
 
 # --- FIXED LOT SIZES (Exness 'm' suffix) ---
 LOT_SIZES = {
@@ -75,7 +77,7 @@ ENTRY_FIELD_NAMES = [
     "entry_price", "entry", "open_price", "price_open", "openPrice", "price", "avg_price", "average_price", "open"
 ]
 
-print("Starting Advanced SMC Bot (Minimum SL Filter Enabled)...")
+print("Starting Advanced SMC Bot (Validating Limit Prices)...")
 
 
 # --- HELPER FUNCTIONS ---
@@ -306,7 +308,8 @@ def manage_open_trades():
 # --- GLOBAL CLEANUP: Cancel all invalid orders across ALL pairs at once ---
 def cleanup_invalid_orders():
     try:
-        all_pending_orders = client.orders.list_pending(ACCOUNT_ID) or []
+        # 🚀 FIX 2: Add wait_ms to list_pending
+        all_pending_orders = client.orders.list_pending(ACCOUNT_ID, wait_ms=500) or []
         if not all_pending_orders: return
 
         ticker_cache = {}
@@ -392,7 +395,8 @@ def check_pair(yf_symbol, mt5_symbol):
 
     # 3. GLOBAL VALIDATION (Includes local memory)
     try:
-        all_pending_orders = client.orders.list_pending(ACCOUNT_ID) or []
+        # 🚀 FIX 2: Add wait_ms to list_pending
+        all_pending_orders = client.orders.list_pending(ACCOUNT_ID, wait_ms=500) or []
         acc_detail = client.accounts.get(ACCOUNT_ID)
         positions = get_attr_safe(acc_detail, ["positions"], []) or []
 
@@ -447,11 +451,11 @@ def check_pair(yf_symbol, mt5_symbol):
 
     if (c3_low > c1_high) and h1_bullish:
         print("🟢 SMC Bullish FVG -> Limit Order")
-        execute_trade(mt5_symbol, "buy", "limit", c1_high, float(df["Low"].iloc[-3:].min()) - sl_buffer, major_high)
+        execute_trade(mt5_symbol, "buy", "limit", c1_high, float(df["Low"].iloc[-3:].min()) - sl_buffer, major_high, current_price)
         return
     elif (c3_high < c1_low) and not h1_bullish:
         print("🔴 SMC Bearish FVG -> Limit Order")
-        execute_trade(mt5_symbol, "sell", "limit", c1_low, float(df["High"].iloc[-3:].max()) + sl_buffer, major_low)
+        execute_trade(mt5_symbol, "sell", "limit", c1_low, float(df["High"].iloc[-3:].max()) + sl_buffer, major_low, current_price)
         return
 
     # STRATEGY 2: B&R
@@ -465,11 +469,11 @@ def check_pair(yf_symbol, mt5_symbol):
 
     if (prev_close > recent_high) and (curr_low <= recent_high) and (curr_close > curr_open) and h1_bullish:
         print("🟢 Bullish B&R -> Limit Order")
-        execute_trade(mt5_symbol, "buy", "limit", recent_high, curr_low - sl_buffer, major_high)
+        execute_trade(mt5_symbol, "buy", "limit", recent_high, curr_low - sl_buffer, major_high, current_price)
         return
     elif (prev_close < recent_low) and (curr_high >= recent_low) and (curr_close < curr_open) and not h1_bullish:
         print("🔴 Bearish B&R -> Limit Order")
-        execute_trade(mt5_symbol, "sell", "limit", recent_low, curr_high + sl_buffer, major_low)
+        execute_trade(mt5_symbol, "sell", "limit", recent_low, curr_high + sl_buffer, major_low, current_price)
         return
 
     # STRATEGY 3: APA
@@ -485,18 +489,18 @@ def check_pair(yf_symbol, mt5_symbol):
 
     if (bull_pin or bull_engulf) and h1_bullish:
         print("🟢 APA Bullish -> Market Order")
-        execute_trade(mt5_symbol, "buy", "market", current_price, curr_low - sl_buffer, major_high)
+        execute_trade(mt5_symbol, "buy", "market", current_price, curr_low - sl_buffer, major_high, current_price)
         return
     elif (bear_pin or bear_engulf) and not h1_bullish:
         print("🔴 APA Bearish -> Market Order")
-        execute_trade(mt5_symbol, "sell", "market", current_price, curr_high + sl_buffer, major_low)
-        return
+        execute_trade(mt5_symbol, "sell", "market", current_price, curr_high + sl_buffer, major_low, current_price)
+        return 
 
     print("No clear setup right now.")
 
 
-# --- HELPER FUNCTION TO PLACE TRADE (MIN SL DISTANCE) ---
-def execute_trade(symbol, side, order_type, entry_price, sl, original_major_target):
+# --- HELPER FUNCTION TO PLACE TRADE (MIN SL DISTANCE & LIMIT VALIDATION) ---
+def execute_trade(symbol, side, order_type, entry_price, sl, original_major_target, current_price):
     global TRADES_PLACED_THIS_RUN
 
     current_lot = float(LOT_SIZES.get(symbol, DEFAULT_LOT_SIZE))
@@ -506,7 +510,7 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
     fmt_sl = fmt_price(symbol, sl)
     risk_distance = abs(fmt_entry - fmt_sl)
 
-    # 🛑 SAFETY CHECK: Minimum SL distance in price
+    # 🛑 SAFETY CHECK 1: Minimum SL distance
     if "JPY" in symbol:
         min_sl = MIN_SL_PIPS_JPY * 0.01
     elif "XAU" in symbol:
@@ -515,12 +519,21 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
         min_sl = MIN_SL_PIPS_STANDARD * 0.0001
 
     if risk_distance < min_sl:
-        print(f"❌ ABORTING TRADE: SL too tight for {symbol}. Calculated risk ({risk_distance:.5f}) is less than minimum ({min_sl:.5f}).")
+        print(f"❌ ABORTING TRADE: SL too tight for {symbol}. Risk ({risk_distance:.5f}) < min ({min_sl:.5f}).")
         return
 
     if risk_distance <= 0:
         print(f"❌ Invalid risk_distance (0) for {symbol}. Aborting order.")
         return
+
+    # 🛑 SAFETY CHECK 2: Validate Limit Order placement
+    if order_type == "limit":
+        if order_side == "BUY" and fmt_entry >= current_price:
+            print(f"❌ ABORTING LIMIT: BUY entry ({fmt_entry}) is ABOVE current price ({current_price}). Broker would reject.")
+            return
+        elif order_side == "SELL" and fmt_entry <= current_price:
+            print(f"❌ ABORTING LIMIT: SELL entry ({fmt_entry}) is BELOW current price ({current_price}). Broker would reject.")
+            return
 
     if order_side == "BUY":
         raw_tp = max(float(original_major_target), fmt_entry + (risk_distance * MIN_RR_RATIO))
@@ -571,4 +584,4 @@ else:
         for yf_sym, mt5_sym in PAIRS:
             check_pair(yf_sym, mt5_sym)
             time.sleep(10)
-print("\nFinished. Going back to sleep.") 
+print("\nFinished. Going back to sleep.")
