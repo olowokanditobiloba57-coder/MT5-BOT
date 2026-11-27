@@ -500,6 +500,7 @@ def check_pair(yf_symbol, mt5_symbol):
 
 
 # --- HELPER FUNCTION TO PLACE TRADE (FORCE MARKET FOR GOLD) ---
+# --- HELPER FUNCTION TO PLACE TRADE (STRICT LIMIT VALIDATION) ---
 def execute_trade(symbol, side, order_type, entry_price, sl, original_major_target, current_price):
     global TRADES_PLACED_THIS_RUN
 
@@ -523,26 +524,23 @@ def execute_trade(symbol, side, order_type, entry_price, sl, original_major_targ
         print(f"❌ Invalid risk_distance (0) for {symbol}. Aborting order.")
         return
 
-    # 🛑 SAFETY CHECK 2: Force Gold to use Market Orders
-    # Gold moves too fast for delayed yfinance data to place Limit Orders.
-    if "XAU" in symbol and order_type == "limit":
-        print(f"⚠️ Gold detected. Forcing Market Order instead of Limit Order to prevent INVALID_PRICE rejection.")
-        order_type = "market"
-        fmt_entry = current_price # Use the current yfinance price for the math
-
-    # 🛑 SAFETY CHECK 3: Validate Limit Order placement (For Forex only)
+    # 🛑 SAFETY CHECK 2: Strict Limit Order Validation
     if order_type == "limit":
-        if "JPY" in symbol: buffer = 0.05 
-        else: buffer = 0.0005 
+        # We use a small buffer to account for yfinance delay
+        if "XAU" in symbol: buffer = 0.5  # 50 cents for Gold
+        elif "JPY" in symbol: buffer = 0.02 # 2 pips for JPY
+        else: buffer = 0.0002 # 2 pips for standard pairs
 
+        # A BUY LIMIT must be placed BELOW the current market price
         if order_side == "BUY" and fmt_entry >= (current_price - buffer):
-            print(f"❌ ABORTING LIMIT: BUY entry ({fmt_entry}) is too close to or above current price ({current_price}). Broker would reject.")
+            print(f"❌ ABORTING LIMIT: BUY entry ({fmt_entry}) is not below current price ({current_price}). Setup is invalid.")
             return
+        
+        # A SELL LIMIT must be placed ABOVE the current market price
         elif order_side == "SELL" and fmt_entry <= (current_price + buffer):
-            print(f"❌ ABORTING LIMIT: SELL entry ({fmt_entry}) is too close to or below current price ({current_price}). Broker would reject.")
+            print(f"❌ ABORTING LIMIT: SELL entry ({fmt_entry}) is not above current price ({current_price}). Setup is invalid.")
             return
 
-    # Recalculate TP based on the actual entry price (especially for forced market orders)
     if order_side == "BUY":
         raw_tp = max(float(original_major_target), fmt_entry + (risk_distance * MIN_RR_RATIO))
     else:
